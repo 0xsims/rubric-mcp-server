@@ -1,0 +1,39 @@
+{
+  "name": "@rubric-protocol/mcp-server",
+  "version": "2.0.2",
+  "description": "AI compliance attestation \u2014 PQ-signed, HCS-anchored decision records. EU AI Act, SR 11-7, HIPAA, NIST AI RMF. Free local tier, no key required.",
+  "bin": {
+    "rubric-mcp": "./dist/index.js"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs --dts --no-splitting",
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  },
+  "mcpName": "io.github.0xsims/rubric-protocol",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/0xsims/rubric-mcp-server.git",
+    "source": "github"
+  },
+  "keywords": [
+    "mcp",
+    "attestation",
+    "compliance",
+    "eu-ai-act",
+    "sr-11-7",
+    "hedera",
+    "post-quantum",
+    "ai-governance"
+  ]
+}

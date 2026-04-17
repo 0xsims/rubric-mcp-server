@@ -1,0 +1,29 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.0xsims/rubric-protocol",
+  "description": "AI compliance attestation for EU AI Act, SR 11-7, HIPAA. Free local tier, no key required.",
+  "repository": {
+    "url": "https://github.com/0xsims/rubric-mcp-server",
+    "source": "github"
+  },
+  "version": "2.0.2",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@rubric-protocol/mcp-server",
+      "version": "2.0.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "RUBRIC_API_KEY",
+          "description": "Rubric API key for Hedera mainnet anchoring. Optional \u2014 omit for free local PQ-signed attestation.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

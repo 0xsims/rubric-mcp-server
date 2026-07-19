@@ -1,6 +1,6 @@
 {
   "name": "@rubric-protocol/mcp-server",
-  "version": "2.0.2",
+  "version": "2.1.0",
   "description": "AI compliance attestation \u2014 PQ-signed, HCS-anchored decision records. EU AI Act, SR 11-7, HIPAA, NIST AI RMF. Free local tier, no key required.",
   "bin": {
     "rubric-mcp": "./dist/index.js"

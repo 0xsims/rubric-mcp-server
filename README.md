@@ -129,12 +129,13 @@ The npm bin stays on stdio. To serve a remote endpoint:
 
 - `POST /mcp` — MCP Streamable HTTP. `initialize` and `tools/list` need no credentials, so a directory can scan the server. `tools/call` requires a key on that request and otherwise returns HTTP 401 with a JSON-RPC error (`code` -32000, `message` "Unauthorized").
 - Send the key as `Authorization: Bearer <key>` or `x-api-key: <key>`. That request key is what is sent upstream as `x-api-key`. `TENPRINT_API_KEY` and `RUBRIC_API_KEY` apply to stdio only. They do not authorize HTTP `tools/call`, so a hosted process cannot spend its own key for an anonymous caller.
+- x402 paid tools are not listed or callable in HTTP mode, even if `RUBRIC_MCP_MODULES` includes `x402` or `all`. A `RUBRIC_WALLET_KEY` or `TENPRINT_WALLET_KEY` on the process is not used to sign or pay. stdio is unchanged.
 - `GET /health` — `{ "status": "ok" }`
 - `GET /.well-known/mcp/server-card.json` — server card. Its `tools` array is the same list `tools/list` returns for this process.
 
 ## Docker
 
-The image runs the HTTP transport, not stdio. `RUBRIC_MCP_MODULES` in the image is `core,x402`, the same default as the package.
+The image runs the HTTP transport, not stdio. `RUBRIC_MCP_MODULES` in the image is `core`. x402 tools stay off in HTTP mode even if that variable includes them.
 
     docker build -t tenprint-mcp .
     docker run --rm -p 8080:8080 tenprint-mcp

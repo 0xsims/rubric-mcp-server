@@ -8,6 +8,7 @@ import { homedir } from "os";
 import { join } from "path";
 
 const BASE = (process.env.RUBRIC_BASE_URL ?? "https://rubric-protocol.com").replace(/[/]$/, "");
+const HTTP_MODE = process.argv.includes("--http");
 const WALLET_KEY = process.env.RUBRIC_WALLET_KEY ?? "";
 const DAILY_LIMIT_USD = Number(process.env.RUBRIC_X402_DAILY_LIMIT ?? "1.00");
 const SPEND_FILE = join(homedir(), ".rubric", "x402-spend.json");
@@ -46,6 +47,7 @@ type PayFetch = (url: string, init: { method: string; headers: { "content-type":
 let payFetchP: Promise<PayFetch> | null = null;
 
 function getPayFetch(): Promise<PayFetch> {
+  if (HTTP_MODE) return Promise.reject(new Error("x402 payments are disabled in HTTP mode"));
   if (!payFetchP) payFetchP = (async () => {
     const { privateKeyToAccount } = await import("viem/accounts");
     const { x402Client, wrapFetchWithPayment } = await import("@x402/fetch");
@@ -67,6 +69,7 @@ async function quotedPriceUsd(url: string, method: string, body: string | undefi
 }
 
 async function paidCall(tool: string, path: string, method: string, body?: unknown): Promise<unknown> {
+  if (HTTP_MODE) return { error: "X402_DISABLED_IN_HTTP_MODE" };
   if (!WALLET_KEY) return NO_WALLET_MSG;
   const st = spendState();
   const max = MAX_PRICE[tool] ?? 0.01;

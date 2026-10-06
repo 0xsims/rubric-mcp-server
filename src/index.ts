@@ -285,12 +285,20 @@ const MCP_MODULES: Record<string, string[]> = {
   registry: ["agent_add", "agent_get", "model_register", "model_get"],
   ops: ["usage_report", "auditor_token_create"],
 };
+const HTTP_MODE = process.argv.includes("--http");
 const _mods = (process.env.RUBRIC_MCP_MODULES ?? "core,x402").split(",").map((s: string) => s.trim()).filter(Boolean);
 const ENABLED_TOOLS = new Set(
   _mods.includes("all") ? Object.values(MCP_MODULES).flat()
                         : _mods.flatMap((m: string) => MCP_MODULES[m] ?? [])
 );
 if (ENABLED_TOOLS.size === 0) MCP_MODULES.core.forEach((t: string) => ENABLED_TOOLS.add(t));
+if (HTTP_MODE) {
+  for (const name of MCP_MODULES.x402) ENABLED_TOOLS.delete(name);
+  const walletVars = ["RUBRIC_WALLET_KEY", "TENPRINT_WALLET_KEY"].filter((name) => (process.env[name] ?? "").trim() !== "");
+  if (walletVars.length > 0) {
+    console.error(`[TenPrint MCP] HTTP mode ignores ${walletVars.join(", ")}. x402 paid tools are disabled and this process will not sign or pay with a server wallet.`);
+  }
+}
 
 export function listEnabledTools() {
   return TOOLS.filter((t) => ENABLED_TOOLS.has(t.name));
@@ -311,6 +319,9 @@ async function handleCallTool(request: { params: { name: string; arguments?: Rec
   const a = (args ?? {}) as Record<string, unknown>;
   try {
     let result: unknown;
+    if (HTTP_MODE && MCP_MODULES.x402.includes(name)) {
+      return { content: [{ type: "text", text: "Error: x402 paid tools are disabled in HTTP mode." }], isError: true };
+    }
     const x = await dispatchX402(name, a);
     if (x !== null) {
       return { content: [{ type: "text", text: JSON.stringify(x, null, 2) }] };

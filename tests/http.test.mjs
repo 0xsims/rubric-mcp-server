@@ -106,7 +106,7 @@ test("unauthenticated initialize and tools/list succeed", async () => {
   assert.ok(Array.isArray(listed.body.result.tools));
   assert.ok(listed.body.result.tools.length > 0);
   assert.ok(listed.body.result.tools.some((tool) => tool.name === "attest"));
-  assert.ok(listed.body.result.tools.some((tool) => tool.name === "screen_entity"));
+  assert.equal(listed.body.result.tools.some((tool) => tool.name === "screen_entity"), false);
 });
 
 test("unauthenticated tools/call is refused", async () => {
@@ -177,6 +177,43 @@ test("HTTP tools/call with no request key is refused even when RUBRIC_API_KEY is
     });
     assert.equal(call.status, 401);
     assert.equal(call.body.error.data.reason, "api_key_required");
+  } finally {
+    envChild.kill();
+  }
+});
+
+const X402_TOOLS = ["screen_entity", "wallet_record", "agent_record", "attested_inference", "hedera_fact", "verify_audit"];
+
+test("HTTP tools/list omits x402 tools when RUBRIC_WALLET_KEY is set", async () => {
+  const envPort = await freePort();
+  const envChild = startServer(envPort, {
+    RUBRIC_WALLET_KEY: "test-wallet-key-not-used",
+    RUBRIC_MCP_MODULES: "all",
+  });
+  try {
+    await waitForHealth(envPort, envChild);
+    assert.match(envChild.stderrText(), /RUBRIC_WALLET_KEY/);
+    assert.match(envChild.stderrText(), /x402 paid tools are disabled/);
+
+    const listed = await mcp(envPort, "tools/list", {});
+    assert.equal(listed.status, 200, JSON.stringify(listed.body));
+    const names = listed.body.result.tools.map((tool) => tool.name);
+    for (const name of X402_TOOLS) assert.equal(names.includes(name), false, name);
+    assert.ok(names.includes("attest"));
+
+    const cardRes = await fetch(`http://127.0.0.1:${envPort}/.well-known/mcp/server-card.json`);
+    const card = await cardRes.json();
+    const cardNames = card.tools.map((tool) => tool.name);
+    for (const name of X402_TOOLS) assert.equal(cardNames.includes(name), false, name);
+
+    const call = await mcp(envPort, "tools/call", {
+      name: "screen_entity",
+      arguments: { name: "example" },
+    }, { authorization: "Bearer request-key" });
+    assert.equal(call.status, 200, JSON.stringify(call.body));
+    assert.equal(call.body.result.isError, true);
+    assert.match(call.body.result.content[0].text, /disabled in HTTP mode/);
+    assert.equal(JSON.stringify(call.body).includes("spentTodayUsd"), false);
   } finally {
     envChild.kill();
   }

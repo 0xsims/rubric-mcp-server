@@ -27,7 +27,7 @@
         },
         {
           "name": "RUBRIC_WALLET_KEY",
-          "description": "Wallet private key for x402 paid tools (USDC on Base). Omit to receive setup guidance instead of a charge.",
+          "description": "Wallet private key for x402 paid tools on stdio (USDC on Base). Omit to receive setup guidance instead of a charge. Ignored in HTTP mode, where x402 tools are disabled.",
           "isRequired": false,
           "isSecret": true,
           "format": "string"

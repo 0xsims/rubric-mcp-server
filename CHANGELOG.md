@@ -2,15 +2,21 @@
 
 ## 2.2.4
 
+2.2.3 was not released.
+
 ### Security
-- x402 payments are signed only for USDC on Base (`eip155:8453`) to the Rubric payee. A requirement with another network, asset, or recipient is refused before signing.
+- x402 payments are signed only for an EIP-3009 USDC `transferWithAuthorization` on Base (`eip155:8453`) to the Rubric payee, with EIP-712 domain `USD Coin` / `2`. Permit2 and any other transfer method are refused before signing. The authorization window is capped at 300 seconds. A zero amount, a non-canonical amount, another network, another asset, or another recipient is refused before signing and is not reserved.
 - Each tool's maximum price is enforced on the payment requirements that would actually be signed. A cheaper quote cannot be followed by a higher charge.
-- The daily spend limit (`RUBRIC_X402_DAILY_LIMIT`, default $1.00) is reserved under an in-process lock and an atomic spend-file update before signing, so parallel calls cannot exceed it.
-- Spend is recorded when the payment is signed, including when the response is not HTTP 200.
-- `@x402/core`, `@x402/fetch`, and `@x402/evm` now require `^2.28.0`.
+- The default daily spend limit is $0.25 (`RUBRIC_X402_DAILY_LIMIT`). An empty value is unset. A value that is not a finite positive decimal falls back to $0.25. It does not mean unlimited.
+- The exact amount being signed is reserved before signing, under a cross-process lock held only for the ledger update. The reservation counts for any response once signed, including a non-200. It is released only when signing fails.
+- A corrupt, wrong-type, negative, future-dated, or symlinked spend ledger refuses payment. It is never treated as zero.
+- Paid requests time out after 30 seconds. A hung call does not block other paid tools in the same process.
+- `@x402/core`, `@x402/fetch`, and `@x402/evm` now require `^2.28.0`. `@modelcontextprotocol/sdk` now requires `^1.32.1`.
 
 ### Changed
 - `repository` is `git+https://github.com/tenprint-ai/tenprint-mcp.git`, `homepage` is `https://tenprint.ai`, and `bugs` is `https://github.com/tenprint-ai/tenprint-mcp/issues`.
+- The spend ledger at `~/.rubric/x402-spend.json` is written as `{date, spentMicro}`. A legacy `{date, spentUsd}` file is still read, converted to micro-USDC, and rounded up.
+- Do not auto-approve the six paid tools in the MCP client. The wallet key is a plaintext client secret, and the model can trigger a payment.
 
 ## 2.0.1
 

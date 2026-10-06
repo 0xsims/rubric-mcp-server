@@ -68,22 +68,24 @@ signed, Hedera-anchored attestation ID your agent can cite later.
 
 1. Create a dedicated wallet and fund it with a small USDC balance on **Base** (Coinbase -> withdraw USDC -> network: Base)
 2. Set `RUBRIC_WALLET_KEY` to that wallet's private key in your MCP server environment
-3. Optional: `RUBRIC_X402_DAILY_LIMIT` (default `1.00` USD/day)
+3. Optional: `RUBRIC_X402_DAILY_LIMIT` (default `0.25` USD/day). An empty value is unset. Anything that is not a finite positive decimal, including `0`, falls back to `0.25`. Values above $10,000 do too.
 
 ### Spend controls
 
 What this client checks before it signs:
 
 - **No wallet key.** Paid tools return setup guidance and do not sign a payment.
-- **Pinned payment.** A requirement is signed only for USDC on Base (`eip155:8453`), only to the Rubric payee, and only at or below that tool's price in the table above. Another network, asset, recipient, or a higher amount is refused before signing.
-- **Daily limit.** The price of the requirement being signed is reserved against `RUBRIC_X402_DAILY_LIMIT` before signing. Reservation uses an in-process lock and an atomic update of `~/.rubric/x402-spend.json`. The reserved amount counts toward the limit even when the HTTP response is not 200, because the authorization was already signed. The total resets at 00:00 UTC.
+- **Pinned payment.** A requirement is signed only for an EIP-3009 USDC `transferWithAuthorization` on Base (`eip155:8453`), only to the Rubric payee, only at or below that tool's price in the table above, and only when the EIP-712 domain is Base USDC (`USD Coin` / `2`). Permit2 and any other transfer method are refused. The amount must be a positive integer string with no leading zeros. The authorization window (`maxTimeoutSeconds`) must be from 1 through 300 seconds. A requirement that fails these checks is not signed and not reserved.
+- **Daily limit.** The exact amount being signed is reserved against `RUBRIC_X402_DAILY_LIMIT` before signing. The reservation is an atomic update of `~/.rubric/x402-spend.json` under a cross-process lock held only for that update, not for the HTTP call. The reserved amount counts toward the limit even when the HTTP response is not 200, because the authorization was already signed. It is released only if signing itself fails. The total resets at 00:00 UTC.
+- **Fail closed.** A missing ledger counts as zero. A corrupt ledger, a wrong type, a negative amount, a future date, or a symlink refuses payment. It is never treated as zero. A legacy `{date, spentUsd}` file is converted to micro-USDC, rounded up, and rewritten as `{date, spentMicro}`.
+- Each process applies its own `RUBRIC_X402_DAILY_LIMIT` to that shared file. A process with a higher limit can spend past another process's limit.
 - A response includes `spentTodayUsd` and `dailyLimitUsd`.
 
 ### Wallet warning
 
 - Use a dedicated wallet that holds only a low balance. The key can sign a USDC transfer up to the balance in that wallet.
 - The private key sits in plaintext in the MCP client config.
-- The model can call a paid tool by itself, and a prompt injection can trigger a payment.
+- The model can call a paid tool by itself, and a prompt injection can trigger a payment. Do not auto-approve the six paid tools in the MCP client.
 - `RUBRIC_BASE_URL` can be redirected. Paid requests are sent to whatever host that variable names.
 
 Catalog, prices, and terms are machine-readable at [x402.json](https://rubric-protocol.com/.well-known/x402.json) and [openapi.json](https://rubric-protocol.com/openapi.json).

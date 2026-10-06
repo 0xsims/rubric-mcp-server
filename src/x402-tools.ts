@@ -1,179 +1,52 @@
 // x402 paid evidence tools - user-funded wallet, spend-governed.
-// Before any signature:
-// (1) no wallet key -> guidance, no payment
-// (2) the requirement actually being signed must be USDC on Base, to the Rubric payee, at or below the tool max
-// (3) that price is reserved against the daily ceiling under a lock, and the reservation counts even when the response is not HTTP 200
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { homedir } from "os";
-import { join } from "path";
-import { randomBytes } from "crypto";
+// The ledger, lock, and payment checks live in ./x402-spend.js so later packages can copy that file verbatim.
+import {
+  BASE_NETWORK,
+  DEFAULT_PAYMENT_TIMEOUT_MS,
+  SpendLedgerError,
+  TOOL_MAX_MICRO,
+  attachSpendHooks,
+  dailyLimitMicro,
+  fetchWithTimeout,
+  microToUsd,
+  microToMoney,
+  readSpend,
+  requirementAllowed,
+  runWithSpendContext,
+} from "./x402-spend.js";
 
 const BASE = (process.env.RUBRIC_BASE_URL ?? "https://rubric-protocol.com").replace(/[/]$/, "");
 const WALLET_KEY = process.env.RUBRIC_WALLET_KEY ?? "";
-const DAILY_LIMIT_USD = Number(process.env.RUBRIC_X402_DAILY_LIMIT ?? "1.00");
-const SPEND_DIR = join(homedir(), ".rubric");
-const SPEND_FILE = join(SPEND_DIR, "x402-spend.json");
-const SPEND_LOCK = SPEND_FILE + ".lock";
-
-// Base mainnet USDC and the Rubric payee published in the x402 catalog.
-const BASE_NETWORK = "eip155:8453" as const;
-const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-const PAY_TO = "0xaB6731A0BcDf511c2842C768a03448075aB654ca";
-
-// tool max prices in USD - enforced on the payment requirements that would be signed
-const MAX_PRICE: Record<string, number> = {
-  screen_entity: 0.01, wallet_record: 0.005, agent_record: 0.005,
-  attested_inference: 0.01, hedera_fact: 0.001, verify_audit: 0.002,
-};
 
 const BUDGET_NOTE = "Raise RUBRIC_X402_DAILY_LIMIT or retry after 00:00 UTC. No payment was made.";
 const PRICE_NOTE = "Payment requirements exceed this tool's maximum. No payment was made.";
-const PIN_NOTE = "Payment requirements must be USDC on Base to the Rubric payee, at or below this tool's maximum. No payment was made.";
+const PIN_NOTE = "Payment requirements must be an EIP-3009 USDC transfer on Base to the Rubric payee, at or below this tool's maximum, with a validity window of at most 5 minutes. No payment was made.";
+const TIMEOUT_NOTE = "The paid request timed out. If a payment was already signed, it still counts toward the daily limit.";
 
-interface SpendState {
-  date: string;
-  spentUsd: number;
-}
-
-interface PaymentReq {
-  scheme?: string;
-  network?: string;
-  asset?: string;
-  payTo?: string;
-  amount?: string | number;
-  maxAmountRequired?: string | number;
-}
-
-function usdToMicros(usd: number): number {
-  return Math.round(usd * 1e6);
-}
-
-function microsToUsd(micros: number): number {
-  return micros / 1e6;
-}
-
-function spendState(): SpendState {
-  const today = new Date().toISOString().slice(0, 10);
-  try {
-    const s = JSON.parse(readFileSync(SPEND_FILE, "utf8")) as SpendState;
-    if (s.date === today && Number.isFinite(s.spentUsd)) return s;
-  } catch { /* fresh day or missing file */ }
-  return { date: today, spentUsd: 0 };
-}
-
-function sleepMs(ms: number): void {
-  const buf = new SharedArrayBuffer(4);
-  Atomics.wait(new Int32Array(buf), 0, 0, ms);
-}
-
-function acquireSpendLock(): void {
-  mkdirSync(SPEND_DIR, { recursive: true });
-  const start = Date.now();
-  for (;;) {
-    try {
-      const fd = openSync(SPEND_LOCK, "wx");
-      try { writeFileSync(fd, String(process.pid)); } finally { closeSync(fd); }
-      return;
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== "EEXIST") throw err;
-      try {
-        const st = statSync(SPEND_LOCK);
-        if (Date.now() - st.mtimeMs > 15_000) unlinkSync(SPEND_LOCK);
-      } catch { /* lock disappeared */ }
-      if (Date.now() - start > 10_000) throw new Error("Timed out waiting for the x402 spend lock");
-      sleepMs(20);
-    }
-  }
-}
-
-function releaseSpendLock(): void {
-  try { unlinkSync(SPEND_LOCK); } catch { /* already released */ }
-}
-
-function withSpendFile<T>(fn: () => T): T {
-  acquireSpendLock();
-  try { return fn(); } finally { releaseSpendLock(); }
-}
-
-function writeSpendAtomic(state: SpendState): void {
-  mkdirSync(SPEND_DIR, { recursive: true });
-  const tmp = join(SPEND_DIR, `.x402-spend.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
-  writeFileSync(tmp, JSON.stringify(state));
-  try {
-    renameSync(tmp, SPEND_FILE);
-  } catch (err) {
-    try { unlinkSync(tmp); } catch { /* ignore */ }
-    throw err;
-  }
-}
-
-function tryReserve(usd: number): { ok: true; spentUsd: number } | { ok: false; spentUsd: number } {
-  return withSpendFile(() => {
-    const s = spendState();
-    const next = usdToMicros(s.spentUsd) + usdToMicros(usd);
-    if (next > usdToMicros(DAILY_LIMIT_USD)) return { ok: false, spentUsd: s.spentUsd };
-    s.spentUsd = microsToUsd(next);
-    writeSpendAtomic(s);
-    return { ok: true, spentUsd: s.spentUsd };
-  });
-}
-
-function releaseReserve(usd: number): void {
-  withSpendFile(() => {
-    const s = spendState();
-    const next = Math.max(0, usdToMicros(s.spentUsd) - usdToMicros(usd));
-    s.spentUsd = microsToUsd(next);
-    writeSpendAtomic(s);
-  });
-}
-
-function budgetExceeded(spentUsd: number): Record<string, unknown> {
-  return { error: "DAILY_BUDGET_EXCEEDED", spentTodayUsd: spentUsd, dailyLimitUsd: DAILY_LIMIT_USD, note: BUDGET_NOTE };
-}
-
-let paymentTail: Promise<void> = Promise.resolve();
-
-function withPaymentLock<T>(fn: () => Promise<T>): Promise<T> {
-  const run = paymentTail.then(fn, fn);
-  paymentTail = run.then(() => undefined, () => undefined);
-  return run;
-}
-
-const NO_WALLET_MSG = { paymentConfigured: false, howTo: "These tools pay per call in USDC on Base (fractions of a cent). Setup: (1) create a wallet, fund with a few USD of USDC on Base; (2) export RUBRIC_WALLET_KEY=<private key> in the MCP server env; (3) optional RUBRIC_X402_DAILY_LIMIT (default 1.00 USD/day). Keys never leave this process." };
+const NO_WALLET_MSG = {
+  paymentConfigured: false,
+  howTo: "These tools pay per call in USDC on Base (fractions of a cent). Setup: (1) create a dedicated wallet and fund it with a small USDC balance on Base; (2) export RUBRIC_WALLET_KEY=<private key> in the MCP server env; (3) optional RUBRIC_X402_DAILY_LIMIT (default 0.25 USD/day). The key is stored in plaintext in the client config. The model can call a paid tool, and a prompt injection can trigger a payment. Do not auto-approve these paid tools in the MCP client.",
+};
 
 type PayFetch = (url: string, init: { method: string; headers: { "content-type": string }; body: string | undefined }) => Promise<Response>;
 const payFetchByTool = new Map<string, Promise<PayFetch>>();
 
-function usdMoney(usd: number): string {
-  const micros = usdToMicros(usd);
-  const whole = Math.trunc(micros / 1_000_000);
-  const frac = String(Math.abs(micros % 1_000_000)).padStart(6, "0").replace(/0+$/, "");
-  return frac.length > 0 ? `$${whole}.${frac}` : `$${whole}`;
+function budgetExceeded(spentMicro: number, limitMicro: number): Record<string, unknown> {
+  return {
+    error: "DAILY_BUDGET_EXCEEDED",
+    spentTodayUsd: microToUsd(spentMicro),
+    dailyLimitUsd: microToUsd(limitMicro),
+    note: BUDGET_NOTE,
+  };
 }
 
-function requirementAtomic(version: number, req: PaymentReq): bigint | null {
-  const raw = version === 1 ? req.maxAmountRequired : req.amount;
-  if (typeof raw === "number") {
-    if (!Number.isInteger(raw) || raw < 0) return null;
-    return BigInt(raw);
-  }
-  if (typeof raw !== "string" || !/^\d+$/.test(raw)) return null;
-  return BigInt(raw);
+function ledgerRefusal(err: unknown): Record<string, unknown> | null {
+  if (err instanceof SpendLedgerError) return { error: err.code, note: err.message };
+  return null;
 }
 
-function requirementAllowed(version: number, req: PaymentReq, maxAtomic: bigint): boolean {
-  if (req.scheme !== "exact") return false;
-  const network = String(req.network ?? "").toLowerCase();
-  if (network !== BASE_NETWORK && network !== "base") return false;
-  if (String(req.asset ?? "").toLowerCase() !== USDC_BASE.toLowerCase()) return false;
-  if (String(req.payTo ?? "").toLowerCase() !== PAY_TO.toLowerCase()) return false;
-  const atomic = requirementAtomic(version, req);
-  return atomic !== null && atomic <= maxAtomic;
-}
-
-function getPayFetch(maxUsd: number): Promise<PayFetch> {
-  const key = usdMoney(maxUsd);
+function getPayFetch(maxMicro: number): Promise<PayFetch> {
+  const key = String(maxMicro);
   const existing = payFetchByTool.get(key);
   if (existing) return existing;
   const created = (async () => {
@@ -182,75 +55,87 @@ function getPayFetch(maxUsd: number): Promise<PayFetch> {
     const { registerExactEvmScheme } = await import("@x402/evm/exact/client");
     const account = privateKeyToAccount(WALLET_KEY as `0x${string}`);
     const client = new x402Client();
-    const maxAtomic = BigInt(usdToMicros(maxUsd));
+    const maxAtomic = BigInt(maxMicro);
     registerExactEvmScheme(client, {
       signer: account,
       networks: [BASE_NETWORK],
       policies: [(version, reqs) => reqs.filter((req) => requirementAllowed(version, req, maxAtomic))],
     });
-    client.setSpendControls({ maxAmountPerPayment: usdMoney(maxUsd) });
-    let pendingUsd = 0;
-    client.onBeforePaymentCreation(async (ctx) => {
-      const atomic = requirementAtomic(ctx.paymentRequired.x402Version, ctx.selectedRequirements);
-      if (atomic === null) return { abort: true, reason: "PRICE_ABOVE_TOOL_MAX" };
-      const usd = microsToUsd(Number(atomic));
-      const reserved = tryReserve(usd);
-      if (!reserved.ok) return { abort: true, reason: "DAILY_BUDGET_EXCEEDED" };
-      pendingUsd = usd;
-    });
-    client.onPaymentCreationFailure(async () => {
-      if (pendingUsd > 0) {
-        const usd = pendingUsd;
-        pendingUsd = 0;
-        releaseReserve(usd);
-      }
-    });
-    return wrapFetchWithPayment(fetch, client) as PayFetch;
+    client.setSpendControls({ maxAmountPerPayment: microToMoney(maxMicro) });
+    attachSpendHooks(client, maxAtomic);
+    return wrapFetchWithPayment(fetchWithTimeout(fetch, DEFAULT_PAYMENT_TIMEOUT_MS), client) as PayFetch;
   })();
   payFetchByTool.set(key, created);
   return created;
 }
 
-function explainRefusal(err: unknown, maxUsd: number): Record<string, unknown> | null {
+async function explainRefusal(err: unknown, maxMicro: number): Promise<Record<string, unknown> | null> {
+  const ledger = ledgerRefusal(err);
+  if (ledger) return ledger;
   const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes("LEDGER_SYMLINK")) return { error: "LEDGER_SYMLINK", note: msg };
+  if (msg.includes("LEDGER_LOCK_TIMEOUT")) return { error: "LEDGER_LOCK_TIMEOUT", note: msg };
+  if (msg.includes("LEDGER_INVALID")) return { error: "LEDGER_INVALID", note: msg };
   if (msg.includes("DAILY_BUDGET_EXCEEDED")) {
-    return budgetExceeded(withSpendFile(() => spendState().spentUsd));
+    try {
+      const state = await readSpend();
+      return budgetExceeded(state.spentMicro, dailyLimitMicro());
+    } catch (readErr) {
+      return ledgerRefusal(readErr) ?? { error: "DAILY_BUDGET_EXCEEDED", note: BUDGET_NOTE };
+    }
   }
   if (msg.includes("PRICE_ABOVE_TOOL_MAX") || msg.includes("maxAmountPerPayment")) {
-    return { error: "PRICE_ABOVE_TOOL_MAX", toolMaxUsd: maxUsd, note: PRICE_NOTE };
+    return { error: "PRICE_ABOVE_TOOL_MAX", toolMaxUsd: microToUsd(maxMicro), note: PRICE_NOTE };
   }
   if (
+    msg.includes("PAYMENT_REQUIREMENTS_REJECTED") ||
     msg.includes("filtered out by policies") ||
     msg.includes("spendControls") ||
     msg.includes("No network/scheme registered") ||
     msg.includes("No client registered")
   ) {
-    return { error: "PAYMENT_REQUIREMENTS_REJECTED", toolMaxUsd: maxUsd, note: PIN_NOTE };
+    return { error: "PAYMENT_REQUIREMENTS_REJECTED", toolMaxUsd: microToUsd(maxMicro), note: PIN_NOTE };
+  }
+  const name = err instanceof Error ? err.name : "";
+  if (name === "TimeoutError" || name === "AbortError" || msg.includes("timed out")) {
+    return { error: "PAYMENT_TIMEOUT", note: TIMEOUT_NOTE };
   }
   return null;
 }
 
 async function paidCall(tool: string, path: string, method: string, body?: unknown): Promise<unknown> {
   if (!WALLET_KEY) return NO_WALLET_MSG;
-  const max = MAX_PRICE[tool] ?? 0.01;
-  return withPaymentLock(async () => {
-    const spentUsd = withSpendFile(() => spendState().spentUsd);
-    if (usdToMicros(spentUsd) >= usdToMicros(DAILY_LIMIT_USD)) return budgetExceeded(spentUsd);
-    const url = BASE + path;
-    const bodyStr = body === undefined ? undefined : JSON.stringify(body);
-    const payFetch = await getPayFetch(max);
-    let r: Response;
-    try {
-      r = await payFetch(url, { method, headers: { "content-type": "application/json" }, body: bodyStr });
-    } catch (err) {
-      const refused = explainRefusal(err, max);
-      if (refused) return refused;
-      throw err;
-    }
-    const j = await r.json().catch(() => ({ raw: "non-json response" })) as Record<string, unknown>;
-    const spent = withSpendFile(() => spendState().spentUsd);
-    return { httpStatus: r.status, ...j, spentTodayUsd: spent, dailyLimitUsd: DAILY_LIMIT_USD };
-  });
+  const maxMicro = TOOL_MAX_MICRO[tool] ?? 10_000;
+  const limitMicro = dailyLimitMicro();
+  let state;
+  try {
+    state = await readSpend();
+  } catch (err) {
+    const refused = ledgerRefusal(err);
+    if (refused) return refused;
+    throw err;
+  }
+  if (state.spentMicro >= limitMicro) return budgetExceeded(state.spentMicro, limitMicro);
+  const url = BASE + path;
+  const bodyStr = body === undefined ? undefined : JSON.stringify(body);
+  const payFetch = await getPayFetch(maxMicro);
+  let r: Response;
+  try {
+    r = await runWithSpendContext(() => payFetch(url, { method, headers: { "content-type": "application/json" }, body: bodyStr }));
+  } catch (err) {
+    const refused = await explainRefusal(err, maxMicro);
+    if (refused) return refused;
+    throw err;
+  }
+  const j = await r.json().catch(() => ({ raw: "non-json response" })) as Record<string, unknown>;
+  try {
+    const spent = await readSpend();
+    return { httpStatus: r.status, ...j, spentTodayUsd: microToUsd(spent.spentMicro), dailyLimitUsd: microToUsd(limitMicro) };
+  } catch (err) {
+    const refused = ledgerRefusal(err);
+    if (refused) return { httpStatus: r.status, ...refused };
+    throw err;
+  }
 }
 
 export const X402_TOOLS = [

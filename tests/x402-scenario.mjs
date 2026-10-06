@@ -1,12 +1,13 @@
 // Mock x402 upstream. No real payments, no broadcast.
 import http from "node:http";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync, lstatSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const PAYTO = "0xaB6731A0BcDf511c2842C768a03448075aB654ca";
-const SPEND_FILE = join(homedir(), ".rubric", "x402-spend.json");
+const SPEND_DIR = join(homedir(), ".rubric");
+const SPEND_FILE = join(SPEND_DIR, "x402-spend.json");
 
 function b64(obj) {
   return Buffer.from(JSON.stringify(obj)).toString("base64");
@@ -54,32 +55,65 @@ function signedValue(header) {
   return String(payload?.payload?.authorization?.value ?? "");
 }
 
-function readSpent() {
+function readLedger() {
   try {
-    const s = JSON.parse(readFileSync(SPEND_FILE, "utf8"));
-    return s.spentUsd;
+    const text = readFileSync(SPEND_FILE, "utf8");
+    let spentMicro = null;
+    try {
+      const s = JSON.parse(text);
+      if (typeof s.spentMicro === "number") spentMicro = s.spentMicro;
+    } catch { /* corrupt ledger stays unparsed */ }
+    return { spentMicro, ledgerText: text };
+  } catch {
+    return { spentMicro: null, ledgerText: null };
+  }
+}
+
+function modes() {
+  try {
+    const dir = lstatSync(SPEND_DIR);
+    const file = lstatSync(SPEND_FILE);
+    return {
+      dir: dir.mode & 0o777,
+      file: file.mode & 0o777,
+      fileIsSymlink: file.isSymbolicLink(),
+    };
   } catch {
     return null;
   }
 }
 
-function startServer(challengeAccepts, bodyAccepts, paidStatus) {
+function today() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function plant(text) {
+  mkdirSync(SPEND_DIR, { recursive: true });
+  writeFileSync(SPEND_FILE, text);
+}
+
+function startServer(spec) {
   const signed = [];
+  let hung = 0;
   const server = http.createServer((req, res) => {
+    if (spec.hangPaths && spec.hangPaths.some((part) => req.url.includes(part))) {
+      hung += 1;
+      return;
+    }
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
       const sig = req.headers["payment-signature"] || req.headers["x-payment"];
       if (sig) {
         signed.push(signedValue(sig));
-        const status = paidStatus();
+        const status = spec.status();
         const body = status === 200 ? { ok: true, attestationId: "test" } : { error: "upstream failed" };
         res.writeHead(status, { "content-type": "application/json" });
         res.end(JSON.stringify(body));
         return;
       }
-      const headerBody = paymentRequired(challengeAccepts());
-      const jsonBody = paymentRequired(bodyAccepts ? bodyAccepts() : challengeAccepts());
+      const headerBody = paymentRequired(spec.header());
+      const jsonBody = paymentRequired(spec.body ? spec.body() : spec.header());
       res.writeHead(402, {
         "content-type": "application/json",
         "payment-required": b64(headerBody),
@@ -94,16 +128,14 @@ function startServer(challengeAccepts, bodyAccepts, paidStatus) {
         server,
         signed,
         url: `http://127.0.0.1:${addr.port}`,
+        hung: () => hung,
       });
     });
   });
 }
 
-const scenario = process.argv[2];
-
 const challenges = {
   "over-price": {
-    // Header is what gets signed. Body quotes the tool max ($0.001) so a preflight would pass.
     header: () => [accept({ amount: "500000" })],
     body: () => [accept({ amount: "1000" })],
     status: () => 200,
@@ -150,8 +182,127 @@ const challenges = {
     limit: "1.00",
     calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
   },
+  "limit-invalid-seeded": {
+    header: () => [accept({ amount: "1000" })],
+    status: () => 200,
+    limit: "abc",
+    prepare: () => plant(JSON.stringify({ date: today(), spentMicro: 250000 })),
+    calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
+  },
+  "limit-invalid-empty": {
+    header: () => [accept({ amount: "1000" })],
+    status: () => 200,
+    limit: "Infinity",
+    calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
+  },
+  "limit-explicit": {
+    header: () => [accept({ amount: "1000" })],
+    status: () => 200,
+    limit: "0.50",
+    prepare: () => plant(JSON.stringify({ date: today(), spentMicro: 250000 })),
+    calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
+  },
+  "ledger-corrupt": {
+    header: () => [accept({ amount: "1000" })],
+    status: () => 200,
+    limit: "1.00",
+    prepare: () => plant("{not json"),
+    calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
+  },
+  "ledger-string": {
+    header: () => [accept({ amount: "1000" })],
+    status: () => 200,
+    limit: "1.00",
+    prepare: () => plant(JSON.stringify({ date: today(), spentMicro: "1000" })),
+    calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
+  },
+  "ledger-negative": {
+    header: () => [accept({ amount: "1000" })],
+    status: () => 200,
+    limit: "1.00",
+    prepare: () => plant(JSON.stringify({ date: today(), spentMicro: -1 })),
+    calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
+  },
+  "ledger-negative-usd": {
+    header: () => [accept({ amount: "1000" })],
+    status: () => 200,
+    limit: "1.00",
+    prepare: () => plant(JSON.stringify({ date: today(), spentUsd: -0.01 })),
+    calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
+  },
+  "ledger-earlier-day": {
+    header: () => [accept({ amount: "1000" })],
+    status: () => 200,
+    limit: "1.00",
+    prepare: () => plant(JSON.stringify({ date: "2020-01-01", spentMicro: 999999 })),
+    calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
+  },
+  "ledger-future": {
+    header: () => [accept({ amount: "1000" })],
+    status: () => 200,
+    limit: "1.00",
+    prepare: () => plant(JSON.stringify({ date: "2999-01-01", spentMicro: 0 })),
+    calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
+  },
+  permit2: {
+    header: () => [accept({ extra: { name: "USD Coin", version: "2", assetTransferMethod: "permit2" } })],
+    status: () => 200,
+    limit: "1.00",
+    calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
+  },
+  "long-validity": {
+    header: () => [accept({ maxTimeoutSeconds: 315360000 })],
+    status: () => 200,
+    limit: "1.00",
+    calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
+  },
+  "zero-amount": {
+    header: () => [accept({ amount: "0" })],
+    status: () => 200,
+    limit: "1.00",
+    calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
+  },
+  "leading-zeros": {
+    header: () => [accept({ amount: "0001000" })],
+    status: () => 200,
+    limit: "1.00",
+    calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
+  },
+  "wrong-domain": {
+    header: () => [accept({ extra: { name: "Not USDC", version: "2" } })],
+    status: () => 200,
+    limit: "1.00",
+    calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
+  },
+  "legacy-usd": {
+    header: () => [accept({ amount: "1000" })],
+    status: () => 200,
+    limit: "1.00",
+    prepare: () => plant(JSON.stringify({ date: today(), spentUsd: 0.0010004 })),
+    calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
+  },
+  symlink: {
+    header: () => [accept({ amount: "1000" })],
+    status: () => 200,
+    limit: "1.00",
+    prepare: () => {
+      mkdirSync(SPEND_DIR, { recursive: true });
+      const target = join(SPEND_DIR, "do-not-touch.txt");
+      writeFileSync(target, "DO-NOT-TOUCH");
+      symlinkSync(target, SPEND_FILE);
+    },
+    calls: () => [{ tool: "hedera_fact", args: { fact: "exchange-rate" } }],
+  },
+  "head-of-line": {
+    header: () => [accept({ amount: "1000" })],
+    status: () => 200,
+    limit: "1.00",
+    hangPaths: ["hedera-facts"],
+    calls: () => [],
+  },
 };
 
+const scenario = process.argv[2];
 const spec = challenges[scenario];
 if (!spec) {
   console.error("unknown scenario " + scenario);
@@ -159,23 +310,51 @@ if (!spec) {
 }
 
 process.env.RUBRIC_X402_DAILY_LIMIT = spec.limit;
-const mock = await startServer(spec.header, spec.body, spec.status);
+const mock = await startServer(spec);
 process.env.RUBRIC_BASE_URL = mock.url;
+if (spec.prepare) spec.prepare();
+const planted = spec.prepare ? readLedger().ledgerText : null;
 
 const { dispatchX402 } = await import("../dist/x402-tools.js");
-const planned = spec.calls();
+
+let elapsedMs = null;
 let results;
-if (spec.parallel) {
-  results = await Promise.all(planned.map((c) => dispatchX402(c.tool, c.args)));
+if (scenario === "head-of-line") {
+  const hang = dispatchX402("hedera_fact", { fact: "exchange-rate" }).catch((err) => ({ error: String(err && err.message ? err.message : err) }));
+  const hangDeadline = Date.now() + 15_000;
+  while (mock.hung() < 1) {
+    if (Date.now() > hangDeadline) throw new Error("hung request never reached the server");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const started = Date.now();
+  const wallet = await dispatchX402("wallet_record", { address: "0x0000000000000000000000000000000000000001" });
+  elapsedMs = Date.now() - started;
+  mock.server.closeAllConnections();
+  await Promise.race([hang, new Promise((resolve) => setTimeout(resolve, 500))]);
+  results = [wallet];
 } else {
-  results = [];
-  for (const c of planned) results.push(await dispatchX402(c.tool, c.args));
+  const planned = spec.calls();
+  if (spec.parallel) {
+    results = await Promise.all(planned.map((c) => dispatchX402(c.tool, c.args)));
+  } else {
+    results = [];
+    for (const c of planned) results.push(await dispatchX402(c.tool, c.args));
+  }
 }
+
+const ledger = readLedger();
+let targetText = null;
+try { targetText = readFileSync(join(SPEND_DIR, "do-not-touch.txt"), "utf8"); } catch { /* absent */ }
 
 mock.server.close();
 process.stdout.write(JSON.stringify({
   signedValues: mock.signed,
   signedCount: mock.signed.length,
   results,
-  spentUsd: readSpent(),
+  spentMicro: ledger.spentMicro,
+  ledgerText: ledger.ledgerText,
+  planted,
+  modes: modes(),
+  elapsedMs,
+  targetText,
 }));

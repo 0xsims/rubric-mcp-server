@@ -14,7 +14,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod +x dist/index.js",
     "prepublishOnly": "npm run build",
     "test": "npm run build && node --test tests/*.test.mjs"
   },
@@ -40,7 +40,7 @@
     "url": "https://github.com/tenprint-ai/tenprint-mcp/issues"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@x402/core": "^2.28.0",
     "@x402/evm": "^2.28.0",
     "@x402/fetch": "^2.28.0",

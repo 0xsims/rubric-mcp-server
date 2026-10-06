@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "ai.tenprint/tenprint",
-  "title": "Tenprint",
+  "title": "TenPrint",
   "description": "Post-quantum AI compliance attestation. Free local tier; API key anchors to Hedera.",
   "repository": {
     "url": "https://github.com/tenprint-ai/tenprint-mcp",

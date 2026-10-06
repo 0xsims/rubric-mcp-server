@@ -10,7 +10,7 @@
 
 ### Changed
 - Package renamed to `@tenprint/mcp-server` (bin `tenprint-mcp`; `rubric-mcp` kept as an alias)
-- Server name shown to clients is Tenprint
+- Server name shown to clients is TenPrint
 - API key environment variable is `TENPRINT_API_KEY`. `RUBRIC_API_KEY` still works and logs a deprecation warning
 
 ### Unchanged

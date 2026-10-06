@@ -1,4 +1,4 @@
-# Tenprint MCP Server
+# TenPrint MCP Server
 
 Post-quantum AI compliance attestation as an MCP server. Works with Claude Desktop, Claude Code, Cursor, Windsurf, Continue, Zed, and any MCP-compatible host.
 
@@ -24,7 +24,7 @@ Edit `claude_desktop_config.json`:
 
 `RUBRIC_API_KEY` is still accepted. If it is set and `TENPRINT_API_KEY` is not, the server logs a deprecation warning and uses the old value.
 
-Restart Claude Desktop. Tenprint tools appear in the MCP menu.
+Restart Claude Desktop. TenPrint tools appear in the MCP menu.
 
 API calls still use `RUBRIC_BASE_URL` (default `https://rubric-protocol.com`). This package does not switch that host on its own.
 
@@ -54,15 +54,15 @@ Higher throughput, SLA, dedicated federation capacity.
 
 ## Paid evidence tools (x402)
 
-Six tools that pay per call in USDC on Base via the x402 protocol. No Tenprint account or API key required on stdio — just a funded wallet. Every response carries a signed, Hedera-anchored attestation ID your agent can cite later.
+Six tools that pay per call in USDC on Base via the x402 protocol. No TenPrint account or API key required on stdio — just a funded wallet. Every response carries a signed, Hedera-anchored attestation ID your agent can cite later.
 
 | Tool | Price | What you get |
 |---|---|---|
 | `screen_entity` | $0.01 | Sanctions/export-control screening across OFAC SDN + Consolidated, UN, UK OFSI, EU, and BIS lists (76K+ entries): per-list results, list file hashes, anchored attestation - audit evidence you screened, against which versions, and what it said |
 | `attested_inference` | $0.01 | gpt-4o-mini completion plus attestation binding prompt hash, response hash, exact model version, timestamp - evidence of which model said what, when |
-| `agent_record` | $0.005 | Unforgeable operating history for any agent attesting through Tenprint - record count, first-seen, continuity - from HCS-anchored records that cannot be backdated |
+| `agent_record` | $0.005 | Unforgeable operating history for any agent attesting through TenPrint - record count, first-seen, continuity - from HCS-anchored records that cannot be backdated |
 | `wallet_record` | $0.005 | Attested x402 payment history for any Base/EVM buyer wallet, from an append-only settlement ledger - evidence, not opinion |
-| `verify_audit` | $0.002 | Independent audit of any Tenprint attestation: signature, HCS sequence, mirror-node confirmation - a signed verdict with its own attestation ID |
+| `verify_audit` | $0.002 | Independent audit of any TenPrint attestation: signature, HCS sequence, mirror-node confirmation - a signed verdict with its own attestation ID |
 | `hedera_fact` | $0.001 | One attested Hedera network fact (exchange rate, gas, supply, nodes, throughput, topic state) |
 
 ### Setup (3 steps)

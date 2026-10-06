@@ -97,7 +97,7 @@ after(() => {
 test("unauthenticated initialize and tools/list succeed", async () => {
   const init = await mcp(port, "initialize", initParams);
   assert.equal(init.status, 200);
-  assert.equal(init.body.result.serverInfo.name, "Tenprint");
+  assert.equal(init.body.result.serverInfo.name, "TenPrint");
   assert.equal(init.body.result.serverInfo.version, "2.3.0");
   assert.equal(init.body.error, undefined);
 
@@ -128,7 +128,7 @@ test("server card tools match tools/list", async () => {
   assert.equal(res.status, 200);
   assert.match(res.headers.get("content-type") ?? "", /application\/json/);
   const card = await res.json();
-  assert.deepEqual(card.serverInfo, { name: "Tenprint", version: "2.3.0" });
+  assert.deepEqual(card.serverInfo, { name: "TenPrint", version: "2.3.0" });
   assert.deepEqual(card.tools, listed.body.result.tools);
   assert.deepEqual(card.resources, []);
   assert.deepEqual(card.prompts, []);

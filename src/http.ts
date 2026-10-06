@@ -153,5 +153,5 @@ export async function startHttpServer(): Promise<void> {
   });
   const address = httpServer.address();
   const bound = typeof address === "object" && address ? address.port : port;
-  console.error(`[Tenprint MCP] Streamable HTTP listening on :${bound} (POST /mcp)`);
+  console.error(`[TenPrint MCP] Streamable HTTP listening on :${bound} (POST /mcp)`);
 }

@@ -1,7 +1,7 @@
 {
   "name": "@tenprint/mcp-server",
   "version": "2.3.0",
-  "description": "Tenprint MCP server — attest, verify, ZK proofs, and x402 paid evidence tools. Free local tier, Hedera mainnet anchoring with an API key.",
+  "description": "TenPrint MCP server — attest, verify, ZK proofs, and x402 paid evidence tools. Free local tier, Hedera mainnet anchoring with an API key.",
   "type": "module",
   "bin": {
     "tenprint-mcp": "./dist/index.js",

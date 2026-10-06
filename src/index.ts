@@ -2,6 +2,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { X402_TOOLS, dispatchX402 } from "./x402-tools.js";
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
@@ -130,6 +131,7 @@ const TOOLS = [
   { name: "model_get", description: "Fetch a registered model's record and commitment.", inputSchema: { type: "object", properties: { model_id: { type: "string" } }, required: ["model_id"] } },
   { name: "usage_report", description: "Current-period usage and quota for your API key.", inputSchema: { type: "object", properties: {} } },
   { name: "auditor_token_create", description: "Mint a scoped read-only auditor-portal token for external examiners. Enterprise tier.", inputSchema: { type: "object", properties: { scope: { type: "string" }, expiresInDays: { type: "number" } } } },
+  ...X402_TOOLS,
 ];
 
 async function handleAttest(args: Record<string, unknown>) {
@@ -251,6 +253,7 @@ const server = new Server(
 
 const MCP_MODULES: Record<string, string[]> = {
   core: ["attest", "verify", "get_proof", "register_agent", "status", "framework_detect", "cost_estimate", "bundle_query"],
+  x402: ["screen_entity", "wallet_record", "agent_record", "attested_inference", "hedera_fact", "verify_audit"],
   attestation: ["attest_batch", "attestation_status", "attestation_get", "pipeline_trace", "bundle_get"],
   verification: ["verify_chain", "verify_tree", "verify_batch", "zk_verify", "zk_proof_get", "ledger_lookup"],
   compliance: ["annex4_generate", "annex4_status", "c2pa_attest", "c2pa_assertion", "credential_issue", "credential_get", "compliance_query", "compliance_report", "filing_generate"],
@@ -259,7 +262,7 @@ const MCP_MODULES: Record<string, string[]> = {
   registry: ["agent_add", "agent_get", "model_register", "model_get"],
   ops: ["usage_report", "auditor_token_create"],
 };
-const _mods = (process.env.RUBRIC_MCP_MODULES ?? "core").split(",").map((s: string) => s.trim()).filter(Boolean);
+const _mods = (process.env.RUBRIC_MCP_MODULES ?? "core,x402").split(",").map((s: string) => s.trim()).filter(Boolean);
 const ENABLED_TOOLS = new Set(
   _mods.includes("all") ? Object.values(MCP_MODULES).flat()
                         : _mods.flatMap((m: string) => MCP_MODULES[m] ?? [])
@@ -273,6 +276,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const a = (args ?? {}) as Record<string, unknown>;
   try {
     let result: unknown;
+    const x = await dispatchX402(name, a);
+    if (x !== null) {
+      return { content: [{ type: "text", text: JSON.stringify(x, null, 2) }] };
+    }
     switch (name) {
       case "attest":            result = await handleAttest(a); break;
       case "verify":            result = await handleVerify(a); break;

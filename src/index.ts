@@ -6,8 +6,9 @@ import { X402_TOOLS, dispatchX402 } from "./x402-tools.js";
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { createHash, randomUUID } from "crypto";
+import { AsyncLocalStorage } from "async_hooks";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -22,6 +23,30 @@ const API_KEY = TENPRINT_API_KEY || LEGACY_API_KEY;
 const BASE_URL = (process.env.RUBRIC_BASE_URL ?? "https://rubric-protocol.com").replace(/\/$/, "");
 const DEFAULT_AGENT_ID = process.env.RUBRIC_AGENT_ID ?? "mcp-agent";
 const LOCAL_MODE = !API_KEY;
+const requestContext = new AsyncLocalStorage<string>();
+
+export const SERVER_NAME = "Tenprint";
+
+/** Env key, overridden by a per-request key while handling an HTTP tools/call. */
+function activeApiKey(): string {
+  return requestContext.getStore() ?? API_KEY;
+}
+
+function isLocalMode(): boolean {
+  return !activeApiKey();
+}
+
+export function hasConfiguredApiKey(): boolean {
+  return Boolean(API_KEY);
+}
+
+export function runWithApiKey<T>(apiKey: string, fn: () => Promise<T>): Promise<T> {
+  return requestContext.run(apiKey, fn);
+}
+
+export function packageVersion(): string {
+  return PKG.version;
+}
 
 const LOCAL_STORE = join(homedir(), ".rubric", "local-bundles");
 mkdirSync(LOCAL_STORE, { recursive: true });
@@ -40,10 +65,11 @@ function sha3(input: string): string {
 }
 
 async function rubricPost<T>(path: string, body: unknown): Promise<T> {
-  if (LOCAL_MODE) throw new Error("This tool requires TENPRINT_API_KEY. Use `register_agent` to request a free key.");
+  const apiKey = activeApiKey();
+  if (!apiKey) throw new Error("This tool requires TENPRINT_API_KEY. Use `register_agent` to request a free key.");
   const res = await fetch(`${BASE_URL}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": API_KEY },
+    headers: { "Content-Type": "application/json", "x-api-key": apiKey },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -54,8 +80,9 @@ async function rubricPost<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function rubricGet<T>(path: string): Promise<T> {
+  const apiKey = activeApiKey();
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: API_KEY ? { "x-api-key": API_KEY } : {},
+    headers: apiKey ? { "x-api-key": apiKey } : {},
   });
   if (!res.ok) throw new Error(`Rubric ${res.status} ${path}`);
   return res.json() as Promise<T>;
@@ -144,7 +171,7 @@ async function handleAttest(args: Record<string, unknown>) {
   const agentId = (args.agent_id as string) ?? DEFAULT_AGENT_ID;
   const metadata = (args.metadata as Record<string, unknown>) ?? { source: "mcp" };
 
-  if (LOCAL_MODE) {
+  if (isLocalMode()) {
     const id = randomUUID();
     const timestamp = new Date().toISOString();
     const leafHash = sha3(JSON.stringify({ payload, agentId, metadata, timestamp }));
@@ -161,7 +188,7 @@ async function handleVerify(args: Record<string, unknown>) {
   const localPath = join(LOCAL_STORE, `${id}.json`);
   if (existsSync(localPath)) {
     const leaf = JSON.parse(readFileSync(localPath, "utf8"));
-    if (LOCAL_MODE) return { ...leaf, source: "local" };
+    if (isLocalMode()) return { ...leaf, source: "local" };
   }
   return rubricGet(`/v1/verify/${encodeURIComponent(id)}`);
 }
@@ -251,11 +278,6 @@ async function handleModelGet(a: Record<string, unknown>) { return rubricGet(`/v
 async function handleUsageReport() { return rubricGet("/v1/usage"); }
 async function handleAuditorTokenCreate(a: Record<string, unknown>) { return rubricPost("/v1/auditor/tokens", a); }
 
-const server = new Server(
-  { name: "Tenprint", version: PKG.version },
-  { capabilities: { tools: {} } }
-);
-
 const MCP_MODULES: Record<string, string[]> = {
   core: ["attest", "verify", "get_proof", "register_agent", "status", "framework_detect", "cost_estimate", "bundle_query"],
   x402: ["screen_entity", "wallet_record", "agent_record", "attested_inference", "hedera_fact", "verify_audit"],
@@ -274,9 +296,21 @@ const ENABLED_TOOLS = new Set(
 );
 if (ENABLED_TOOLS.size === 0) MCP_MODULES.core.forEach((t: string) => ENABLED_TOOLS.add(t));
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS.filter((t: { name: string }) => ENABLED_TOOLS.has(t.name)) }));
+export function listEnabledTools() {
+  return TOOLS.filter((t) => ENABLED_TOOLS.has(t.name));
+}
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+export function createMcpServer(): Server {
+  const server = new Server(
+    { name: SERVER_NAME, version: PKG.version },
+    { capabilities: { tools: {} } }
+  );
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listEnabledTools() }));
+  server.setRequestHandler(CallToolRequestSchema, handleCallTool);
+  return server;
+}
+
+async function handleCallTool(request: { params: { name: string; arguments?: Record<string, unknown> } }) {
   const { name, arguments: args } = request.params;
   const a = (args ?? {}) as Record<string, unknown>;
   try {
@@ -341,11 +375,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const msg = err instanceof Error ? err.message : String(err);
     return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
   }
-});
-
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
 }
 
-main().catch((err) => { console.error(err); process.exit(1); });
+function startedAsCli(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return import.meta.url === pathToFileURL(entry).href;
+}
+
+async function main() {
+  if (process.argv.includes("--http")) {
+    const { startHttpServer } = await import("./http.js");
+    await startHttpServer();
+    return;
+  }
+  const transport = new StdioServerTransport();
+  await createMcpServer().connect(transport);
+}
+
+if (startedAsCli()) {
+  main().catch((err) => { console.error(err); process.exit(1); });
+}

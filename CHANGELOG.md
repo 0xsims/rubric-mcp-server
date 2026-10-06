@@ -2,6 +2,11 @@
 
 ## 2.3.0
 
+### Added
+- Streamable HTTP transport via `node dist/index.js --http` (stdio stays the default for the npm bin)
+- `POST /mcp`, `GET /health`, and `GET /.well-known/mcp/server-card.json`
+- HTTP `tools/call` requires `Authorization: Bearer <key>`, an `x-api-key` header, or `TENPRINT_API_KEY` / `RUBRIC_API_KEY` in the environment. `initialize` and `tools/list` do not
+
 ### Changed
 - Package renamed to `@tenprint/mcp-server` (bin `tenprint-mcp`; `rubric-mcp` kept as an alias)
 - Server name shown to clients is Tenprint

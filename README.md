@@ -119,6 +119,19 @@ Default profile is `core` plus `x402`. Set `RUBRIC_MCP_MODULES=all` for the rest
 - **Federation**: 5 geo-distributed nodes (US, SG, JP, CA, EU)
 - **ZK proofs**: Noir beta.19, depth-20 Poseidon2 Merkle inclusion
 
+## Streamable HTTP
+
+The npm bin stays on stdio. To serve a remote endpoint:
+
+    PORT=8080 node dist/index.js --http
+
+`PORT` defaults to 3000.
+
+- `POST /mcp` — MCP Streamable HTTP. `initialize` and `tools/list` need no credentials, so a directory can scan the server. `tools/call` requires an API key and otherwise returns HTTP 401 with a JSON-RPC error (`code` -32000, `message` "Unauthorized").
+- Send the key as `Authorization: Bearer <key>` or `x-api-key: <key>`. A key already in the environment (`TENPRINT_API_KEY`, or `RUBRIC_API_KEY` if the new name is unset) also satisfies the check. A key on the request is the one sent upstream as `x-api-key`.
+- `GET /health` — `{ "status": "ok" }`
+- `GET /.well-known/mcp/server-card.json` — server card. Its `tools` array is the same list `tools/list` returns for this process.
+
 ## Links
 
 - Homepage: https://tenprint.ai

@@ -112,9 +112,8 @@ test("x402 refuses to sign when the 402 price is above the tool maximum", async 
       RUBRIC_X402_DAILY_LIMIT: "1.00",
     }, { name: "hedera_fact", args: { fact: "exchange-rate" } });
     assert.equal(paid.signed(), 0);
-    assert.equal(result.error, "PAYMENT_REJECTED");
-    assert.match(result.message, /maxAmountPerPayment|filtered out by policies/);
-    assert.equal(result.spentTodayUsd, 0);
+    assert.equal(result.error, "PRICE_ABOVE_TOOL_MAX");
+    assert.equal(result.toolMaxUsd, 0.001);
     assert.equal(result.httpStatus, undefined);
   } finally {
     await paid.close();
@@ -236,7 +235,83 @@ test("an empty RUBRIC_X402_DAILY_LIMIT uses the default limit", async () => {
     assert.equal(result.httpStatus, 200, JSON.stringify(result));
     assert.equal(result.error, undefined);
     assert.equal(result.spentTodayUsd, 0.001);
-    assert.equal(result.dailyLimitUsd, 1);
+    assert.equal(result.dailyLimitUsd, 0.25);
+  } finally {
+    await paid.close();
+  }
+});
+
+test("confirm mode checks the server requirements against the quoted price", async () => {
+  const permit2 = await startPaid({
+    amount: 1_000,
+    paidStatus: 200,
+    overrides: { extra: { name: "USD Coin", version: "2", assetTransferMethod: "permit2" } },
+  });
+  const overQuote = await startPaid({ amount: 2_000, paidStatus: 200 });
+  try {
+    const [quoted, rejected] = await run({
+      RUBRIC_BASE_URL: permit2.url,
+      RUBRIC_X402_DAILY_LIMIT: "1.00",
+      RUBRIC_X402_CONFIRM: "1",
+    }, {
+      sequence: [
+        { name: "hedera_fact", args: { fact: "nodes" } },
+        { name: "hedera_fact", args: { fact: "nodes", confirm: true, quote_id: "$quote" } },
+      ],
+    });
+    assert.equal(quoted.confirmationRequired, true);
+    assert.equal(quoted.maxPriceUsd, 0.001);
+    assert.equal(rejected.error, "PAYMENT_REQUIREMENTS_REJECTED");
+    assert.equal(permit2.signed(), 0);
+
+    const [again, tooHigh] = await run({
+      RUBRIC_BASE_URL: overQuote.url,
+      RUBRIC_X402_DAILY_LIMIT: "1.00",
+      RUBRIC_X402_CONFIRM: "1",
+    }, {
+      sequence: [
+        { name: "hedera_fact", args: { fact: "nodes" } },
+        { name: "hedera_fact", args: { fact: "nodes", confirm: true, quote_id: "$quote" } },
+      ],
+    });
+    assert.equal(again.confirmationRequired, true);
+    assert.equal(tooHigh.error, "PRICE_ABOVE_TOOL_MAX");
+    assert.equal(tooHigh.toolMaxUsd, 0.001);
+    assert.equal(overQuote.signed(), 0);
+  } finally {
+    await permit2.close();
+    await overQuote.close();
+  }
+});
+
+test("an upstream error with no payment signed does not reserve spend", async () => {
+  let signed = 0;
+  const server = createServer((_req, res) => {
+    res.writeHead(500, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "upstream failed" }));
+  });
+  const paid = await new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      resolve({
+        url: `http://127.0.0.1:${port}`,
+        close: () => new Promise((done) => server.close(() => done())),
+      });
+    });
+  });
+  server.on("request", (req) => {
+    if (req.headers["payment-signature"] || req.headers["x-payment"]) signed += 1;
+  });
+  try {
+    const result = await run({
+      RUBRIC_BASE_URL: paid.url,
+      RUBRIC_X402_DAILY_LIMIT: "0.25",
+    }, { name: "hedera_fact", args: { fact: "supply" } });
+    assert.equal(signed, 0);
+    assert.equal(result.httpStatus, 500, JSON.stringify(result));
+    assert.equal(result.spentTodayUsd, 0);
+    assert.equal(result.error, "upstream failed");
   } finally {
     await paid.close();
   }

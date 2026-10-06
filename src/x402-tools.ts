@@ -1,115 +1,41 @@
 // x402 paid evidence tools. The wallet key is used only when the caller passes
 // allowPayments (stdio). HTTP must pass allowPayments: false and never reaches signing.
-import type { PaymentPolicy } from "@x402/core/client";
+// The ledger, lock, and payment checks live in ./x402-spend.js. That file is shared
+// verbatim with the 2.2.4 package.
 import { randomUUID } from "crypto";
-import { readFileSync, writeFileSync, mkdirSync } from "fs";
-import { homedir } from "os";
-import { dirname, join } from "path";
+import {
+  BASE_NETWORK,
+  DEFAULT_PAYMENT_TIMEOUT_MS,
+  PAY_TO,
+  SpendLedgerError,
+  TOOL_MAX_MICRO,
+  USDC_BASE,
+  attachSpendHooks,
+  dailyLimitMicro,
+  fetchWithTimeout,
+  microToUsd,
+  microToMoney,
+  readSpend,
+  requirementAllowed,
+  runWithSpendContext,
+} from "./x402-spend.js";
 
-// Spend-ledger call sites. src/x402-spend.ts will replace reserveSpend and releaseSpend
-// verbatim when the shared module lands. paidCall is the only caller. The ledger path
-// is ~/.rubric/x402-spend.json. There is no path override.
+const BUDGET_NOTE = "Raise RUBRIC_X402_DAILY_LIMIT or retry after 00:00 UTC. No payment was made.";
+const PRICE_NOTE = "Payment requirements exceed this tool's maximum. No payment was made.";
+const PIN_NOTE = "Payment requirements must be an EIP-3009 USDC transfer on Base to the Rubric payee, at or below this tool's maximum, with a validity window of at most 5 minutes. No payment was made.";
+const TIMEOUT_NOTE = "The paid request timed out. If a payment was already signed, it still counts toward the daily limit.";
 
-const BASE_NETWORK = "eip155:8453";
-const BASE_NETWORK_V1 = "base";
-const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-const PAYTO = "0xaB6731A0BcDf511c2842C768a03448075aB654ca";
-
-// Tool maximums in USDC atomic units (6 decimals).
-const MAX_MICRO: Record<string, number> = {
-  screen_entity: 10_000,
-  wallet_record: 5_000,
-  agent_record: 5_000,
-  attested_inference: 10_000,
-  hedera_fact: 1_000,
-  verify_audit: 2_000,
+const NO_WALLET_MSG = {
+  paymentConfigured: false,
+  howTo: "These tools pay per call in USDC on Base. Use a dedicated low-balance wallet, never a main wallet. Set RUBRIC_WALLET_KEY to that key. Optional RUBRIC_X402_DAILY_LIMIT (default 0.25 USD/day). Do not auto-approve these tools in the MCP client. RUBRIC_X402_CONFIRM=1 is a speed bump the model can set itself, not a human approval.",
 };
 
-interface SpendState {
-  date: string;
-  spentMicro: number;
+function walletKey(): string {
+  return process.env.RUBRIC_WALLET_KEY ?? "";
 }
 
-interface PaymentRequirement {
-  scheme?: string;
-  network?: string;
-  asset?: string;
-  payTo?: string;
-  amount?: string | number;
-  maxAmountRequired?: string | number;
-}
-
-let budgetTail: Promise<unknown> = Promise.resolve();
-
-function withBudgetLock<T>(fn: () => Promise<T>): Promise<T> {
-  const run = budgetTail.then(fn, fn);
-  budgetTail = run.then(() => undefined, () => undefined);
-  return run;
-}
-
-function spendFile(): string {
-  return join(homedir(), ".rubric", "x402-spend.json");
-}
-
-function todayUtc(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function dailyLimitMicro(): number {
-  const raw = (process.env.RUBRIC_X402_DAILY_LIMIT ?? "").trim();
-  if (!raw) return 1_000_000;
-  const value = Number(raw);
-  if (!Number.isFinite(value) || value < 0) return 1_000_000;
-  return Math.round(value * 1e6);
-}
-
-function microToUsd(micro: number): number {
-  return Math.round(micro) / 1e6;
-}
-
-function microToMoney(micro: number): `$${string}` {
-  const whole = Math.trunc(micro / 1e6);
-  const frac = String(Math.abs(micro % 1e6)).padStart(6, "0").replace(/0+$/, "");
-  return (frac ? `$${whole}.${frac}` : `$${whole}`) as `$${string}`;
-}
-
-function readSpend(): SpendState {
-  const today = todayUtc();
-  try {
-    const parsed = JSON.parse(readFileSync(spendFile(), "utf8")) as Partial<SpendState>;
-    if (parsed.date === today && typeof parsed.spentMicro === "number" && Number.isFinite(parsed.spentMicro)) {
-      return { date: today, spentMicro: parsed.spentMicro };
-    }
-  } catch { /* fresh day or missing file */ }
-  return { date: today, spentMicro: 0 };
-}
-
-function writeSpend(state: SpendState): void {
-  const file = spendFile();
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify(state));
-}
-
-async function reserveSpend(micro: number): Promise<{ ok: boolean; spentMicro: number; limitMicro: number; date: string }> {
-  return withBudgetLock(async () => {
-    const limitMicro = dailyLimitMicro();
-    const state = readSpend();
-    if (state.spentMicro + micro > limitMicro) {
-      return { ok: false, spentMicro: state.spentMicro, limitMicro, date: state.date };
-    }
-    state.spentMicro += micro;
-    writeSpend(state);
-    return { ok: true, spentMicro: state.spentMicro, limitMicro, date: state.date };
-  });
-}
-
-async function releaseSpend(micro: number, date: string): Promise<number> {
-  return withBudgetLock(async () => {
-    const state = readSpend();
-    if (state.date === date) state.spentMicro = Math.max(0, state.spentMicro - micro);
-    writeSpend(state);
-    return state.spentMicro;
-  });
+function apiBase(): string {
+  return (process.env.RUBRIC_BASE_URL ?? "https://rubric-protocol.com").replace(/[/]$/, "");
 }
 
 function confirmRequired(): boolean {
@@ -117,129 +43,113 @@ function confirmRequired(): boolean {
   return raw === "1" || raw === "true" || raw === "yes";
 }
 
-function walletKey(): string {
-  return process.env.RUBRIC_WALLET_KEY ?? "";
+function budgetExceeded(spentMicro: number, limitMicro: number): Record<string, unknown> {
+  return {
+    error: "DAILY_BUDGET_EXCEEDED",
+    spentTodayUsd: microToUsd(spentMicro),
+    dailyLimitUsd: microToUsd(limitMicro),
+    note: BUDGET_NOTE,
+  };
 }
 
-const NO_WALLET_MSG = {
-  paymentConfigured: false,
-  howTo: "These tools pay per call in USDC on Base. Use a dedicated low-balance wallet, never a main wallet. Set RUBRIC_WALLET_KEY to that key. Optional RUBRIC_X402_DAILY_LIMIT (default 1.00 USD/day; the shared spend module will lower the default to 0.25). Do not auto-approve these tools in the MCP client. RUBRIC_X402_CONFIRM=1 is a speed bump the model can set itself, not a human approval.",
-};
-
-function requirementAmount(version: number, requirement: PaymentRequirement): bigint | null {
-  const raw = version === 1 ? requirement.maxAmountRequired : requirement.amount;
-  if (raw === undefined || raw === null) return null;
-  try {
-    return BigInt(raw);
-  } catch {
-    return null;
-  }
+function ledgerRefusal(err: unknown): Record<string, unknown> | null {
+  if (err instanceof SpendLedgerError) return { error: err.code, note: err.message };
+  return null;
 }
 
-function pricePolicy(cap: bigint): PaymentPolicy {
-  return (version, requirements) => requirements.filter((requirement) => {
-    const candidate = requirement as PaymentRequirement;
-    if (candidate.scheme !== "exact") return false;
-    const network = candidate.network ?? "";
-    if (network !== BASE_NETWORK && network !== BASE_NETWORK_V1) return false;
-    if ((candidate.asset ?? "").toLowerCase() !== USDC_BASE.toLowerCase()) return false;
-    if ((candidate.payTo ?? "").toLowerCase() !== PAYTO.toLowerCase()) return false;
-    const amount = requirementAmount(version, candidate);
-    return amount !== null && amount <= cap;
-  });
-}
+type PayFetch = (url: string, init: { method: string; headers: { "content-type": string }; body: string | undefined }) => Promise<Response>;
+const payFetchByCap = new Map<string, Promise<PayFetch>>();
 
-async function createPaidClient(tool: string, key: string) {
-  const { privateKeyToAccount } = await import("viem/accounts");
-  const { x402Client } = await import("@x402/fetch");
-  const { registerExactEvmScheme } = await import("@x402/evm/exact/client");
-  const account = privateKeyToAccount(key as `0x${string}`);
-  const cap = BigInt(MAX_MICRO[tool] ?? 0);
-  const client = new x402Client();
-  registerExactEvmScheme(client, {
-    signer: account,
-    networks: [BASE_NETWORK],
-      policies: [pricePolicy(cap)],
-  });
-  client.setSpendControls({ maxAmountPerPayment: microToMoney(Number(cap)) });
-  return client;
-}
-
-const clientCache = new Map<string, ReturnType<typeof createPaidClient>>();
-
-function getClient(tool: string): ReturnType<typeof createPaidClient> {
+function getPayFetch(maxMicro: number): Promise<PayFetch> {
   const key = walletKey();
-  const cacheKey = `${tool}\0${key}`;
-  const cached = clientCache.get(cacheKey);
-  if (cached) return cached;
-  const pending = createPaidClient(tool, key);
-  clientCache.set(cacheKey, pending);
-  return pending;
-}
-
-function requestSigned(input: RequestInfo | URL, init?: RequestInit): boolean {
-  const headers = new Headers(input instanceof Request ? input.headers : undefined);
-  if (init?.headers) new Headers(init.headers).forEach((value, name) => headers.set(name, value));
-  return headers.has("payment-signature") || headers.has("x-payment");
-}
-
-async function paidCall(tool: string, path: string, method: string, body?: unknown): Promise<unknown> {
-  const maxMicro = MAX_MICRO[tool] ?? 0;
-  const maxUsd = microToUsd(maxMicro);
-  if (!walletKey()) return NO_WALLET_MSG;
-  const apiBase = (process.env.RUBRIC_BASE_URL ?? "https://rubric-protocol.com").replace(/[/]$/, "");
-  const held = await reserveSpend(maxMicro);
-  if (!held.ok) {
-    return {
-      error: "DAILY_BUDGET_EXCEEDED",
-      spentTodayUsd: microToUsd(held.spentMicro),
-      dailyLimitUsd: microToUsd(held.limitMicro),
-      note: "Reserved spend for today has reached RUBRIC_X402_DAILY_LIMIT. No payment was submitted. Resets 00:00 UTC.",
-    };
-  }
-
-  let signed = false;
-  try {
-    const client = await getClient(tool);
-    const { wrapFetchWithPayment } = await import("@x402/fetch");
-    const payFetch = wrapFetchWithPayment(async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (requestSigned(input, init)) signed = true;
-      return fetch(input, init);
-    }, client);
-    const url = apiBase + path;
-    const response = await payFetch(url, {
-      method,
-      headers: { "content-type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
+  const cacheKey = `${maxMicro}\0${key}`;
+  const existing = payFetchByCap.get(cacheKey);
+  if (existing) return existing;
+  const created = (async () => {
+    const { privateKeyToAccount } = await import("viem/accounts");
+    const { x402Client, wrapFetchWithPayment } = await import("@x402/fetch");
+    const { registerExactEvmScheme } = await import("@x402/evm/exact/client");
+    const account = privateKeyToAccount(key as `0x${string}`);
+    const client = new x402Client();
+    const maxAtomic = BigInt(maxMicro);
+    registerExactEvmScheme(client, {
+      signer: account,
+      networks: [BASE_NETWORK],
+      policies: [(version, reqs) => reqs.filter((req) => requirementAllowed(version, req, maxAtomic))],
     });
-    const payload = await response.json().catch(() => ({ raw: "non-json response" })) as Record<string, unknown>;
-    // A response means the payment was submitted. Count it for every status.
-    return {
-      httpStatus: response.status,
-      ...payload,
-      spentTodayUsd: microToUsd(held.spentMicro),
-      dailyLimitUsd: microToUsd(held.limitMicro),
-    };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (!signed) {
-      const spentMicro = await releaseSpend(maxMicro, held.date);
-      return {
-        error: "PAYMENT_REJECTED",
-        message,
-        toolMaxUsd: maxUsd,
-        spentTodayUsd: microToUsd(spentMicro),
-        dailyLimitUsd: microToUsd(held.limitMicro),
-        note: "No payment was submitted. Requirements must be USDC on Base paid to the published address, at or below this tool's maximum.",
-      };
+    client.setSpendControls({ maxAmountPerPayment: microToMoney(maxMicro) });
+    attachSpendHooks(client, maxAtomic);
+    return wrapFetchWithPayment(fetchWithTimeout(fetch, DEFAULT_PAYMENT_TIMEOUT_MS), client) as PayFetch;
+  })();
+  payFetchByCap.set(cacheKey, created);
+  return created;
+}
+
+async function explainRefusal(err: unknown, maxMicro: number): Promise<Record<string, unknown> | null> {
+  const ledger = ledgerRefusal(err);
+  if (ledger) return ledger;
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes("LEDGER_SYMLINK")) return { error: "LEDGER_SYMLINK", note: msg };
+  if (msg.includes("LEDGER_LOCK_TIMEOUT")) return { error: "LEDGER_LOCK_TIMEOUT", note: msg };
+  if (msg.includes("LEDGER_INVALID")) return { error: "LEDGER_INVALID", note: msg };
+  if (msg.includes("DAILY_BUDGET_EXCEEDED")) {
+    try {
+      const state = await readSpend();
+      return budgetExceeded(state.spentMicro, dailyLimitMicro());
+    } catch (readErr) {
+      return ledgerRefusal(readErr) ?? { error: "DAILY_BUDGET_EXCEEDED", note: BUDGET_NOTE };
     }
-    return {
-      error: "PAYMENT_SUBMITTED",
-      message,
-      spentTodayUsd: microToUsd(held.spentMicro),
-      dailyLimitUsd: microToUsd(held.limitMicro),
-      note: "A payment was submitted and counts toward today's limit even though the call did not finish cleanly.",
-    };
+  }
+  if (msg.includes("PRICE_ABOVE_TOOL_MAX") || msg.includes("maxAmountPerPayment")) {
+    return { error: "PRICE_ABOVE_TOOL_MAX", toolMaxUsd: microToUsd(maxMicro), note: PRICE_NOTE };
+  }
+  if (
+    msg.includes("PAYMENT_REQUIREMENTS_REJECTED") ||
+    msg.includes("filtered out by policies") ||
+    msg.includes("spendControls") ||
+    msg.includes("No network/scheme registered") ||
+    msg.includes("No client registered")
+  ) {
+    return { error: "PAYMENT_REQUIREMENTS_REJECTED", toolMaxUsd: microToUsd(maxMicro), note: PIN_NOTE };
+  }
+  const name = err instanceof Error ? err.name : "";
+  if (name === "TimeoutError" || name === "AbortError" || msg.includes("timed out")) {
+    return { error: "PAYMENT_TIMEOUT", note: TIMEOUT_NOTE };
+  }
+  return null;
+}
+
+async function paidCall(path: string, method: string, body: unknown | undefined, maxMicro: number): Promise<unknown> {
+  if (!walletKey()) return NO_WALLET_MSG;
+  const limitMicro = dailyLimitMicro();
+  let state;
+  try {
+    state = await readSpend();
+  } catch (err) {
+    const refused = ledgerRefusal(err);
+    if (refused) return refused;
+    throw err;
+  }
+  if (state.spentMicro >= limitMicro) return budgetExceeded(state.spentMicro, limitMicro);
+  const url = apiBase() + path;
+  const bodyStr = body === undefined ? undefined : JSON.stringify(body);
+  const payFetch = await getPayFetch(maxMicro);
+  let response: Response;
+  try {
+    response = await runWithSpendContext(() => payFetch(url, { method, headers: { "content-type": "application/json" }, body: bodyStr }));
+  } catch (err) {
+    const refused = await explainRefusal(err, maxMicro);
+    if (refused) return refused;
+    throw err;
+  }
+  const payload = await response.json().catch(() => ({ raw: "non-json response" })) as Record<string, unknown>;
+  try {
+    const spent = await readSpend();
+    return { httpStatus: response.status, ...payload, spentTodayUsd: microToUsd(spent.spentMicro), dailyLimitUsd: microToUsd(limitMicro) };
+  } catch (err) {
+    const refused = ledgerRefusal(err);
+    if (refused) return { httpStatus: response.status, ...refused };
+    throw err;
   }
 }
 
@@ -250,6 +160,7 @@ interface PendingQuote {
   tool: string;
   argsKey: string;
   maxPriceUsd: number;
+  maxMicro: number;
   expiresAt: number;
 }
 
@@ -282,20 +193,21 @@ function pruneQuotes(now = Date.now()): void {
   }
 }
 
-function issueQuote(tool: string, args: Record<string, unknown>, maxPriceUsd: number): PendingQuote {
+function issueQuote(tool: string, args: Record<string, unknown>, maxMicro: number): PendingQuote {
   pruneQuotes();
   const quote: PendingQuote = {
     id: randomUUID(),
     tool,
     argsKey: canonicalArgs(args),
-    maxPriceUsd,
+    maxPriceUsd: microToUsd(maxMicro),
+    maxMicro,
     expiresAt: Date.now() + quoteTtlMs(),
   };
   pendingQuotes.set(quote.id, quote);
   return quote;
 }
 
-function takeQuote(tool: string, args: Record<string, unknown>, maxPriceUsd: number): PendingQuote | undefined {
+function takeQuote(tool: string, args: Record<string, unknown>, maxMicro: number): PendingQuote | undefined {
   const now = Date.now();
   pruneQuotes(now);
   const id = typeof args.quote_id === "string" ? args.quote_id : "";
@@ -303,7 +215,7 @@ function takeQuote(tool: string, args: Record<string, unknown>, maxPriceUsd: num
   if (!quote) return undefined;
   pendingQuotes.delete(id);
   if (quote.expiresAt <= now) return undefined;
-  if (quote.tool !== tool || quote.argsKey !== canonicalArgs(args) || quote.maxPriceUsd !== maxPriceUsd) return undefined;
+  if (quote.tool !== tool || quote.argsKey !== canonicalArgs(args) || quote.maxMicro !== maxMicro) return undefined;
   return quote;
 }
 
@@ -334,14 +246,28 @@ export interface X402CallOptions {
   allowPayments?: boolean;
 }
 
+function routePaid(name: string, a: Record<string, unknown>, maxMicro: number): Promise<unknown> {
+  switch (name) {
+    case "screen_entity": return paidCall("/v1/x402/attested-screening", "POST", { name: a.name, queryId: a.query_id }, maxMicro);
+    case "wallet_record": return paidCall("/v1/x402/wallet-record/" + encodeURIComponent(String(a.address ?? "")), "GET", undefined, maxMicro);
+    case "agent_record": return paidCall("/v1/x402/agent-record/" + encodeURIComponent(String(a.agent_id ?? "")), "GET", undefined, maxMicro);
+    case "attested_inference": return paidCall("/v1/x402/attested-inference", "POST", { messages: [{ role: "user", content: String(a.prompt ?? "") }], max_tokens: Math.min(Number(a.max_tokens ?? 500), 1000) }, maxMicro);
+    case "hedera_fact": return paidCall("/v1/x402/hedera-facts/" + encodeURIComponent(String(a.fact ?? "")), "GET", undefined, maxMicro);
+    case "verify_audit": return paidCall("/v1/x402/verify-audit", "POST", { attestationId: a.attestation_id }, maxMicro);
+    default: return Promise.resolve(null);
+  }
+}
+
 export async function dispatchX402(name: string, a: Record<string, unknown>, opts?: X402CallOptions): Promise<unknown> {
-  const known = Object.prototype.hasOwnProperty.call(MAX_MICRO, name);
+  const known = Object.prototype.hasOwnProperty.call(TOOL_MAX_MICRO, name);
   if (!known) return null;
   if (opts?.allowPayments !== true) return { error: "X402_DISABLED_IN_HTTP_MODE" };
+  const toolMax = TOOL_MAX_MICRO[name] ?? 0;
+  let maxMicro = toolMax;
   if (confirmRequired()) {
-    const maxPriceUsd = microToUsd(MAX_MICRO[name] ?? 0);
+    const maxPriceUsd = microToUsd(toolMax);
     if (a.confirm !== true) {
-      const quote = issueQuote(name, a, maxPriceUsd);
+      const quote = issueQuote(name, a, toolMax);
       return {
         confirmationRequired: true,
         quoteId: quote.id,
@@ -349,12 +275,13 @@ export async function dispatchX402(name: string, a: Record<string, unknown>, opt
         maxPriceUsd,
         network: BASE_NETWORK,
         asset: USDC_BASE,
-        payTo: PAYTO,
+        payTo: PAY_TO,
         expiresAt: new Date(quote.expiresAt).toISOString(),
-        note: "Speed bump only. The model sets confirm, so this is not human approval. Call the same tool with the same arguments, confirm: true, and this quoteId before it expires. The quote works once. No payment was made.",
+        note: "Speed bump only. The model sets confirm, so this is not human approval. Call the same tool with the same arguments, confirm: true, and this quoteId before it expires. The quote works once. The confirming call checks the server's requirements against this quoted price with the same network, asset, payTo, amount, permit2, validity, and EIP-712 rules. No payment was made.",
       };
     }
-    if (!takeQuote(name, a, maxPriceUsd)) {
+    const quote = takeQuote(name, a, toolMax);
+    if (!quote) {
       return {
         error: "CONFIRMATION_INVALID",
         tool: name,
@@ -362,14 +289,8 @@ export async function dispatchX402(name: string, a: Record<string, unknown>, opt
         note: "No matching unused quote for this tool, arguments, and price. Quotes are single use and expire quickly. No payment was made.",
       };
     }
+    // The quoted atomic price is the cap requirementAllowed applies on this call.
+    maxMicro = quote.maxMicro;
   }
-  switch (name) {
-    case "screen_entity": return paidCall(name, "/v1/x402/attested-screening", "POST", { name: a.name, queryId: a.query_id });
-    case "wallet_record": return paidCall(name, "/v1/x402/wallet-record/" + encodeURIComponent(String(a.address ?? "")), "GET");
-    case "agent_record": return paidCall(name, "/v1/x402/agent-record/" + encodeURIComponent(String(a.agent_id ?? "")), "GET");
-    case "attested_inference": return paidCall(name, "/v1/x402/attested-inference", "POST", { messages: [{ role: "user", content: String(a.prompt ?? "") }], max_tokens: Math.min(Number(a.max_tokens ?? 500), 1000) });
-    case "hedera_fact": return paidCall(name, "/v1/x402/hedera-facts/" + encodeURIComponent(String(a.fact ?? "")), "GET");
-    case "verify_audit": return paidCall(name, "/v1/x402/verify-audit", "POST", { attestationId: a.attestation_id });
-    default: return null;
-  }
+  return routePaid(name, a, maxMicro);
 }

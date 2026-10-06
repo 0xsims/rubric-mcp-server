@@ -69,7 +69,7 @@ Six tools that pay per call in USDC on Base via the x402 protocol. No TenPrint a
 
 1. Create a **dedicated** wallet and fund it with a small amount of USDC on **Base**. Use that wallet only for these tool payments. Do not put `RUBRIC_WALLET_KEY` on a main wallet or any wallet that holds funds you cannot afford to lose.
 2. Set `RUBRIC_WALLET_KEY` to that wallet's private key in the MCP client config that launches this server.
-3. Optional: `RUBRIC_X402_DAILY_LIMIT` (USD/day). The default is `1.00`. An empty value is unset and uses that default; it does not mean zero. Once the shared spend module lands, the default becomes `$0.25`. Optional: `RUBRIC_X402_CONFIRM=1`, described below. It is a speed bump, not a control.
+3. Optional: `RUBRIC_X402_DAILY_LIMIT` (USD/day). The default is `$0.25`. An empty value is unset and uses that default; it does not mean zero. Optional: `RUBRIC_X402_CONFIRM=1`, described below. It is a speed bump, not a control.
 
 ### Before you put a key in a client config
 
@@ -81,8 +81,8 @@ Six tools that pay per call in USDC on Base via the x402 protocol. No TenPrint a
 
 ### What this process enforces
 
-- A payment is signed only for Base (`eip155:8453`, or the v1 network name `base`), asset USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, and payTo `0xaB6731A0BcDf511c2842C768a03448075aB654ca`, and only when the amount is at or below that tool's documented maximum. The check is on the requirements that would be signed.
-- The daily limit reserves that tool maximum before signing. Once a payment header is sent, the reservation counts toward the limit whatever HTTP status comes back. If signing throws before a payment header is sent, the reservation is released. An HTTP response that never carried a payment still keeps the reservation; the shared spend module will release those. The counter resets at 00:00 UTC. The ledger file is `~/.rubric/x402-spend.json`. There is no environment variable that moves it.
+- A payment is signed only for Base (`eip155:8453`, or the v1 network name `base`), asset USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, and payTo `0xaB6731A0BcDf511c2842C768a03448075aB654ca`. The amount must be a positive integer with no leading zeros, at or below that tool's documented maximum. Permit2, a validity window outside 1 to 300 seconds, and an EIP-712 domain other than name `USD Coin` version `2` are refused. The check is on the requirements that would be signed. In confirm mode, that cap is the quoted price.
+- The daily limit defaults to `$0.25`. It reserves the exact amount that would be signed, and only once signing starts. If signing does not finish, the reservation is released. An upstream error that comes back with no payment signed does not keep a reservation. Once a payment is signed, it counts toward the limit whatever HTTP status comes back, including a non-200 and a timeout of the paid retry. The counter resets at 00:00 UTC. The ledger file is `~/.rubric/x402-spend.json`. There is no environment variable that moves it.
 - No wallet key: the tool returns setup guidance and does not pay.
 - Paid responses include `spentTodayUsd`. That number is what this process has reserved, not a promise about charges made outside it.
 

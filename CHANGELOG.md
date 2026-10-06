@@ -14,10 +14,10 @@
 - Server name shown to clients is TenPrint. Clients that stored the previous name `@rubric-protocol/mcp-server` will see a new server.
 - API key environment variable is `TENPRINT_API_KEY`. `RUBRIC_API_KEY` still works and logs a deprecation warning
 - Requires Node.js 22 or newer. Node 18 and Node 20 are no longer supported. Node 20 reached end of life in April 2026
-- x402 payments are limited to USDC on Base paid to the published address, at or below each tool's maximum, with the daily budget reserved before signing
+- x402 payments are limited to USDC on Base paid to the published address, at or below each tool's maximum. The shared spend module reserves the exact amount, refuses permit2, a validity window outside 1–300 seconds, a zero or leading-zero amount, and a wrong EIP-712 domain, and times out a paid fetch after 30 seconds
 - Handlers that used to forward a whole argument object now send only the fields named in that tool's schema (`pick()`). Undocumented extra fields are dropped
-- An empty `RUBRIC_X402_DAILY_LIMIT` means unset and uses the default (`1.00` USD/day until the shared spend module lowers that default to `0.25`). It does not mean zero
-- `RUBRIC_X402_CONFIRM=1` returns a quote bound to the same tool, arguments, and price. The confirming call must match, the quote is single use, and it expires quickly. The model sets `confirm`, so this is a speed bump, not a human approval
+- An empty `RUBRIC_X402_DAILY_LIMIT` means unset. The default is `$0.25` per day. An invalid limit uses that same default. It does not mean zero and it does not mean unlimited
+- `RUBRIC_X402_CONFIRM=1` returns a quote bound to the same tool, arguments, and price. The confirming call must match, the quote is single use, and it expires quickly. That call checks the server's requirements against the quoted price with the same payment rules as a normal call. The model sets `confirm`, so this is a speed bump, not a human approval
 - `createMcpServer()` does not sign payments or forward the host API key unless the caller passes `{ transport: "stdio" }`. The stdio CLI is the only entry that opts in
 - Removed the undocumented `RUBRIC_X402_SPEND_FILE` override. The ledger path is `~/.rubric/x402-spend.json`
 
@@ -27,6 +27,7 @@
 - HTTP requests are checked for `Host` and `Origin`, bound to `127.0.0.1` unless `HOST` is set, limited in body size and rate, and `GET`/`DELETE /mcp` return 405. The host allowlist includes bracketed `[::1]`. Rate-limit keys use the socket address unless `TENPRINT_TRUSTED_PROXY` is set, and the bucket table is capped
 - `verify` on stdio only reads local bundle ids inside `~/.rubric/local-bundles`. HTTP does not read that directory
 - Disabled `RUBRIC_MCP_MODULES` entries are rejected on `tools/call`
+- x402 spend uses one shared ledger and lock (`src/x402-spend.ts`, copied verbatim from the 2.2.4 security branch at `cd157a17`). A corrupt, negative, or future ledger refuses payment. A legacy `spentUsd` value is read and rewritten as `spentMicro`. An upstream error with no payment signed releases the reservation. Several processes share one daily counter
 
 The changelog published with npm `@rubric-protocol/mcp-server` stopped at 2.0.1. This file does not add notes for 2.1 or 2.2.
 
@@ -34,7 +35,6 @@ The changelog published with npm `@rubric-protocol/mcp-server` stopped at 2.0.1.
 
 - **License.** The owner has not chosen one. There is no `LICENSE` file. Do not publish before that choice is made.
 - **Repository and registry.** `github.com/tenprint-ai/tenprint-mcp` does not exist yet. `ai.tenprint/tenprint` still needs DNS or HTTP proof, and `@tenprint/mcp-server` is not published. Both wait on the transfer.
-- **Shared spend module.** Cross-process locking, atomic symlink-safe writes, one `{date, spentMicro}` ledger that can also read legacy `spentUsd`, fail-closed handling of a corrupt or negative ledger, a `$0.25` default limit, exact-amount reservation and release, permit2 / validity / zero / EIP-712 checks, and a fetch timeout will be ported from `src/x402-spend.ts`. `reserveSpend` and `releaseSpend` inside `paidCall` are the call sites.
 
 ### Unchanged
 - x402 paid tools and the rest of the 2.2.2 tool surface

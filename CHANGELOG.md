@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.3.0
+
+### Changed
+- Package renamed to `@tenprint/mcp-server` (bin `tenprint-mcp`; `rubric-mcp` kept as an alias)
+- Server name shown to clients is Tenprint
+- API key environment variable is `TENPRINT_API_KEY`. `RUBRIC_API_KEY` still works and logs a deprecation warning
+
+### Unchanged
+- x402 paid tools and the rest of the 2.2.2 tool surface
+- Default API base URL remains `https://rubric-protocol.com` via `RUBRIC_BASE_URL`
+
 ## 2.0.1
 
 ### Fixed

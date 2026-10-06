@@ -1,12 +1,12 @@
-# @rubric-protocol/mcp-server
+# Tenprint MCP Server
 
 Post-quantum AI compliance attestation as an MCP server. Works with Claude Desktop, Claude Code, Cursor, Windsurf, Continue, Zed, and any MCP-compatible host.
 
-**v2.0 — now with free local tier.** No API key required to start attesting.
+Package: `@tenprint/mcp-server`. The `tenprint-mcp` binary is the primary command. `rubric-mcp` remains installed as an alias.
 
 ## Install
 
-    npm install -g @rubric-protocol/mcp-server
+    npm install -g @tenprint/mcp-server
 
 ## Configure (Claude Desktop)
 
@@ -14,15 +14,19 @@ Edit `claude_desktop_config.json`:
 
     {
       "mcpServers": {
-        "rubric": {
+        "tenprint": {
           "command": "npx",
-          "args": ["-y", "@rubric-protocol/mcp-server"],
-          "env": { "RUBRIC_API_KEY": "optional-for-hcs-anchoring" }
+          "args": ["-y", "@tenprint/mcp-server"],
+          "env": { "TENPRINT_API_KEY": "optional-for-hcs-anchoring" }
         }
       }
     }
 
-Restart Claude Desktop. Rubric tools appear in the MCP menu.
+`RUBRIC_API_KEY` is still accepted. If it is set and `TENPRINT_API_KEY` is not, the server logs a deprecation warning and uses the old value.
+
+Restart Claude Desktop. Tenprint tools appear in the MCP menu.
+
+API calls still use `RUBRIC_BASE_URL` (default `https://rubric-protocol.com`). This package does not switch that host on its own.
 
 ## Tiers
 
@@ -39,29 +43,26 @@ Everything above, plus:
 - HCS anchoring on Hedera mainnet (tamper-evident third-party timestamp)
 - `get_proof` — ZK Merkle inclusion proofs (Noir/Barretenberg)
 
-Request a key via the `register_agent` tool, or at https://rubric-protocol.com
+Request a key via the `register_agent` tool. The product site is https://tenprint.ai.
 
 ### Standard+ tier ($999/mo)
-- `compliance_tag` — attach regulatory framework tags to bundles
 - `bundle_query` — filter by leafType, agentId, time range
 - 100K attestations/mo, overage $0.01 each
 
 ### Enterprise ($9,999/mo) / Dedicated ($25K+/mo)
 Higher throughput, SLA, dedicated federation capacity.
 
-## Paid evidence tools (x402) - new in 2.2
+## Paid evidence tools (x402)
 
-Six tools that pay per call in USDC on Base via the x402 protocol. No Rubric
-account or API key required - just a funded wallet. Every response carries a
-signed, Hedera-anchored attestation ID your agent can cite later.
+Six tools that pay per call in USDC on Base via the x402 protocol. No Tenprint account or API key required on stdio — just a funded wallet. Every response carries a signed, Hedera-anchored attestation ID your agent can cite later.
 
 | Tool | Price | What you get |
 |---|---|---|
 | `screen_entity` | $0.01 | Sanctions/export-control screening across OFAC SDN + Consolidated, UN, UK OFSI, EU, and BIS lists (76K+ entries): per-list results, list file hashes, anchored attestation - audit evidence you screened, against which versions, and what it said |
 | `attested_inference` | $0.01 | gpt-4o-mini completion plus attestation binding prompt hash, response hash, exact model version, timestamp - evidence of which model said what, when |
-| `agent_record` | $0.005 | Unforgeable operating history for any agent attesting through Rubric - record count, first-seen, continuity - from HCS-anchored records that cannot be backdated |
+| `agent_record` | $0.005 | Unforgeable operating history for any agent attesting through Tenprint - record count, first-seen, continuity - from HCS-anchored records that cannot be backdated |
 | `wallet_record` | $0.005 | Attested x402 payment history for any Base/EVM buyer wallet, from an append-only settlement ledger - evidence, not opinion |
-| `verify_audit` | $0.002 | Independent audit of any Rubric attestation: signature, HCS sequence, mirror-node confirmation - a signed verdict with its own attestation ID |
+| `verify_audit` | $0.002 | Independent audit of any Tenprint attestation: signature, HCS sequence, mirror-node confirmation - a signed verdict with its own attestation ID |
 | `hedera_fact` | $0.001 | One attested Hedera network fact (exchange rate, gas, supply, nodes, throughput, topic state) |
 
 ### Setup (3 steps)
@@ -78,8 +79,6 @@ signed, Hedera-anchored attestation ID your agent can cite later.
 - **Full accounting.** Every paid response includes `spentTodayUsd`.
 - Your key never leaves the MCP process. A failed operation is never charged.
 
-Catalog, prices, and terms are machine-readable at [x402.json](https://rubric-protocol.com/.well-known/x402.json) and [openapi.json](https://rubric-protocol.com/openapi.json).
-
 ## Module configuration
 
 Tools load by module via `RUBRIC_MCP_MODULES` (default: `core,x402`).
@@ -90,17 +89,27 @@ Available: `core`, `x402`, `attestation`, `verification`, `compliance`,
 
 EU AI Act (Articles 9–15, 17, 26, 49, 72, 73, Annexes IV/XI/XII), SR 11-7, OCC, FDIC, NIST AI RMF 1.0, TX TRAIGA, CO AI Act, HIPAA, EU DSA, NIS2, SEC, CFTC, ECOA Reg B, NYC LL144.
 
-## Tools (50+ across 9 modules)
+## Tools (53 across 9 modules)
 
-- `attest` — attest an AI decision (local free, HCS with key)
-- `verify` — verify attestation by ID
-- `get_proof` — ZK Merkle inclusion proof
-- `register_agent` — request free developer API key
-- `status` — federation health
-- `framework_detect` — auto-detect regulatory frameworks
-- `cost_estimate` — monthly cost projection
-- `compliance_tag` — attach framework tags (Standard+)
-- `bundle_query` — query bundles (Standard+)
+Default profile is `core` plus `x402`. Set `RUBRIC_MCP_MODULES=all` for the rest.
+
+**core:** attest, verify, get_proof, register_agent, status, framework_detect, cost_estimate, bundle_query
+
+**x402:** screen_entity, wallet_record, agent_record, attested_inference, hedera_fact, verify_audit
+
+**attestation:** attest_batch, attestation_status, attestation_get, pipeline_trace, bundle_get
+
+**verification:** verify_chain, verify_tree, verify_batch, zk_verify, zk_proof_get, ledger_lookup
+
+**compliance:** annex4_generate, annex4_status, c2pa_attest, c2pa_assertion, credential_issue, credential_get, compliance_query, compliance_report, filing_generate
+
+**regulatory:** gpai_register, gpai_downstream, nist_rmf_certify, nist_rmf_status, jurisdiction_map, jurisdiction_assess, jurisdiction_gap
+
+**governance:** incident_create, incident_attest, incident_resolve, human_review, adversarial_session_start, adversarial_session_conclude
+
+**registry:** agent_add, agent_get, model_register, model_get
+
+**ops:** usage_report, auditor_token_create
 
 ## Architecture
 
@@ -112,7 +121,7 @@ EU AI Act (Articles 9–15, 17, 26, 49, 72, 73, Annexes IV/XI/XII), SR 11-7, OCC
 
 ## Links
 
-- Homepage: https://rubric-protocol.com
-- Pricing: https://rubric-protocol.com/pricing
-- Status: https://rubric-protocol.com/status
+- Homepage: https://tenprint.ai
+- Repository: https://github.com/tenprint-ai/tenprint-mcp
+- Issues: https://github.com/tenprint-ai/tenprint-mcp/issues
 - Changelog: ./CHANGELOG.md

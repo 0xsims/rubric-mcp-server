@@ -13,7 +13,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PKG = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8")) as { name: string; version: string };
 
-const API_KEY = process.env.RUBRIC_API_KEY ?? "";
+const TENPRINT_API_KEY = process.env.TENPRINT_API_KEY ?? "";
+const LEGACY_API_KEY = process.env.RUBRIC_API_KEY ?? "";
+if (!TENPRINT_API_KEY && LEGACY_API_KEY) {
+  console.error("[Tenprint MCP] RUBRIC_API_KEY is deprecated; set TENPRINT_API_KEY. The old name still works for now.");
+}
+const API_KEY = TENPRINT_API_KEY || LEGACY_API_KEY;
 const BASE_URL = (process.env.RUBRIC_BASE_URL ?? "https://rubric-protocol.com").replace(/\/$/, "");
 const DEFAULT_AGENT_ID = process.env.RUBRIC_AGENT_ID ?? "mcp-agent";
 const LOCAL_MODE = !API_KEY;
@@ -22,12 +27,12 @@ const LOCAL_STORE = join(homedir(), ".rubric", "local-bundles");
 mkdirSync(LOCAL_STORE, { recursive: true });
 
 if (LOCAL_MODE) {
-  console.error("[Rubric MCP] ⚠  LOCAL-ONLY MODE");
-  console.error("[Rubric MCP]   Attestations are PQ-signed locally but NOT HCS-anchored.");
-  console.error("[Rubric MCP]   For Hedera mainnet anchoring, set RUBRIC_API_KEY.");
-  console.error("[Rubric MCP]   Request a free key via the `register_agent` tool.");
+  console.error("[Tenprint MCP] ⚠  LOCAL-ONLY MODE");
+  console.error("[Tenprint MCP]   Attestations are PQ-signed locally but NOT HCS-anchored.");
+  console.error("[Tenprint MCP]   For Hedera mainnet anchoring, set TENPRINT_API_KEY.");
+  console.error("[Tenprint MCP]   Request a free key via the `register_agent` tool.");
 } else {
-  console.error(`[Rubric MCP] HCS-anchored mode — ${BASE_URL} / agent: ${DEFAULT_AGENT_ID}`);
+  console.error(`[Tenprint MCP] HCS-anchored mode — ${BASE_URL} / agent: ${DEFAULT_AGENT_ID}`);
 }
 
 function sha3(input: string): string {
@@ -35,7 +40,7 @@ function sha3(input: string): string {
 }
 
 async function rubricPost<T>(path: string, body: unknown): Promise<T> {
-  if (LOCAL_MODE) throw new Error("This tool requires RUBRIC_API_KEY. Use `register_agent` to request a free key.");
+  if (LOCAL_MODE) throw new Error("This tool requires TENPRINT_API_KEY. Use `register_agent` to request a free key.");
   const res = await fetch(`${BASE_URL}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-api-key": API_KEY },
@@ -83,13 +88,13 @@ function estimateMonthly(decisionsPerDay: number) {
 }
 
 const TOOLS = [
-  { name: "attest", description: "Attest an AI decision. With RUBRIC_API_KEY: HCS-anchored on Hedera mainnet. Without: PQ-signed local Merkle leaf in ~/.rubric/local-bundles/.", inputSchema: { type: "object", properties: { payload: { type: "string" }, agent_id: { type: "string" }, metadata: { type: "object", additionalProperties: true } }, required: ["payload"] } },
+  { name: "attest", description: "Attest an AI decision. With TENPRINT_API_KEY: HCS-anchored on Hedera mainnet. Without: PQ-signed local Merkle leaf in ~/.rubric/local-bundles/.", inputSchema: { type: "object", properties: { payload: { type: "string" }, agent_id: { type: "string" }, metadata: { type: "object", additionalProperties: true } }, required: ["payload"] } },
   { name: "verify", description: "Verify an attestation. Checks local store first, then federation. Merkle inclusion + HCS anchoring.", inputSchema: { type: "object", properties: { attestation_id: { type: "string" } }, required: ["attestation_id"] } },
   { name: "get_proof", description: "Generate ZK Merkle inclusion proof (Noir/Barretenberg) for an attestation. Requires API key.", inputSchema: { type: "object", properties: { attestation_id: { type: "string" } }, required: ["attestation_id"] } },
-  { name: "register_agent", description: "Register an agent and receive a free Rubric developer API key via email.", inputSchema: { type: "object", properties: { email: { type: "string" }, agent_name: { type: "string" }, use_case: { type: "string" } }, required: ["email", "agent_name"] } },
+  { name: "register_agent", description: "Register an agent and receive a free Tenprint developer API key via email.", inputSchema: { type: "object", properties: { email: { type: "string" }, agent_name: { type: "string" }, use_case: { type: "string" } }, required: ["email", "agent_name"] } },
   { name: "status", description: "Federation health across US/SG/JP/CA/EU nodes + ZK node.", inputSchema: { type: "object", properties: {} } },
   { name: "framework_detect", description: "Auto-detect applicable regulatory frameworks (EU AI Act, SR 26-2, HIPAA, NIST AI RMF, etc.) from decision content. Works offline, no key required.", inputSchema: { type: "object", properties: { payload: { type: "string" }, metadata: { type: "object", additionalProperties: true } }, required: ["payload"] } },
-  { name: "cost_estimate", description: "Estimate monthly Rubric cost from expected decision volume. No key required.", inputSchema: { type: "object", properties: { decisions_per_day: { type: "number" } }, required: ["decisions_per_day"] } },
+  { name: "cost_estimate", description: "Estimate monthly Tenprint cost from expected decision volume. No key required.", inputSchema: { type: "object", properties: { decisions_per_day: { type: "number" } }, required: ["decisions_per_day"] } },
   { name: "bundle_query", description: "Query attestation bundles by leaf type, agent, or time range. Requires Standard+ tier.", inputSchema: { type: "object", properties: { leafType: { type: "string" }, agentId: { type: "string" }, limit: { type: "number" } } } },
 
   { name: "attest_batch", description: "Batch-attest up to 1,000 AI decisions in one call (tiered path, HCS-anchored at tier-2 flush). Requires API key.", inputSchema: { type: "object", properties: { items: { type: "array", items: { type: "object", properties: { data: { type: "string" }, sourceId: { type: "string" } }, required: ["data", "sourceId"] } } }, required: ["items"] } },
@@ -145,7 +150,7 @@ async function handleAttest(args: Record<string, unknown>) {
     const leafHash = sha3(JSON.stringify({ payload, agentId, metadata, timestamp }));
     const leaf = { attestationId: id, leafHash, timestamp, agentId, metadata, mode: "local", anchored: false };
     writeFileSync(join(LOCAL_STORE, `${id}.json`), JSON.stringify(leaf, null, 2));
-    return { ...leaf, upgrade: "Set RUBRIC_API_KEY for HCS anchoring, or use `register_agent` for a free key." };
+    return { ...leaf, upgrade: "Set TENPRINT_API_KEY for HCS anchoring, or use `register_agent` for a free key." };
   }
 
   return rubricPost("/v1/tiered-attest", { agentId, sourceId: agentId, data: payload, metadata });
@@ -247,7 +252,7 @@ async function handleUsageReport() { return rubricGet("/v1/usage"); }
 async function handleAuditorTokenCreate(a: Record<string, unknown>) { return rubricPost("/v1/auditor/tokens", a); }
 
 const server = new Server(
-  { name: PKG.name, version: PKG.version },
+  { name: "Tenprint", version: PKG.version },
   { capabilities: { tools: {} } }
 );
 

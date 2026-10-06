@@ -1,27 +1,57 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.0xsims/rubric-protocol",
-  "description": "AI compliance attestation for EU AI Act, SR 11-7, HIPAA. Free local tier, no key required.",
+  "name": "ai.tenprint/tenprint",
+  "title": "Tenprint",
+  "description": "Post-quantum AI compliance attestation. Free local tier; API key anchors to Hedera.",
   "repository": {
-    "url": "https://github.com/0xsims/rubric-mcp-server",
+    "url": "https://github.com/tenprint-ai/tenprint-mcp",
     "source": "github"
   },
-  "version": "2.0.2",
+  "version": "2.3.0",
+  "websiteUrl": "https://tenprint.ai",
   "packages": [
     {
       "registryType": "npm",
-      "identifier": "@rubric-protocol/mcp-server",
-      "version": "2.0.2",
+      "identifier": "@tenprint/mcp-server",
+      "version": "2.3.0",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
-          "name": "RUBRIC_API_KEY",
-          "description": "Rubric API key for Hedera mainnet anchoring. Optional \u2014 omit for free local PQ-signed attestation.",
+          "name": "TENPRINT_API_KEY",
+          "description": "API key for Hedera anchoring. Optional; omit for the free local tier. RUBRIC_API_KEY still works as a deprecated fallback.",
           "isRequired": false,
           "isSecret": true,
           "format": "string"
+        },
+        {
+          "name": "RUBRIC_WALLET_KEY",
+          "description": "Wallet private key for x402 paid tools (USDC on Base). Omit to receive setup guidance instead of a charge.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "RUBRIC_MCP_MODULES",
+          "description": "Comma-separated tool modules to expose. Default is core,x402. Use all for every module.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.tenprint.ai/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer API key. Required for tools/call. initialize and tools/list work without it.",
+          "isRequired": false,
+          "isSecret": true
         }
       ]
     }

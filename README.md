@@ -132,6 +132,15 @@ The npm bin stays on stdio. To serve a remote endpoint:
 - `GET /health` — `{ "status": "ok" }`
 - `GET /.well-known/mcp/server-card.json` — server card. Its `tools` array is the same list `tools/list` returns for this process.
 
+## Docker
+
+The image runs the HTTP transport, not stdio. `RUBRIC_MCP_MODULES` in the image is `core,x402`, the same default as the package.
+
+    docker build -t tenprint-mcp .
+    docker run --rm -p 8080:8080 tenprint-mcp
+
+`POST http://127.0.0.1:8080/mcp` then serves `initialize` and `tools/list` with no key. Pass `-e TENPRINT_API_KEY=your-key` when `tools/call` should be allowed without a per-request credential. A caller can still send `Authorization: Bearer <key>` or `x-api-key` instead.
+
 ## Links
 
 - Homepage: https://tenprint.ai

@@ -1,26 +1,40 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.0xsims/rubric-protocol",
+  "name": "io.github.0xsims/rubric-mcp",
   "description": "AI compliance attestation for EU AI Act, SR 11-7, HIPAA. Free local tier, no key required.",
   "repository": {
-    "url": "https://github.com/0xsims/rubric-mcp-server",
+    "url": "https://github.com/tenprint-ai/tenprint-mcp",
     "source": "github"
   },
-  "version": "2.0.2",
+  "version": "2.2.4",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@rubric-protocol/mcp-server",
-      "version": "2.0.2",
+      "version": "2.2.4",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
           "name": "RUBRIC_API_KEY",
-          "description": "Rubric API key for Hedera mainnet anchoring. Optional \u2014 omit for free local PQ-signed attestation.",
+          "description": "Rubric API key for Hedera mainnet anchoring. Optional — omit for free local PQ-signed attestation.",
           "isRequired": false,
           "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "RUBRIC_WALLET_KEY",
+          "description": "Private key of a dedicated low-balance wallet used to pay for x402 tools in USDC on Base. The key is stored in plaintext in the client config. Do not auto-approve the paid tools.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "RUBRIC_X402_DAILY_LIMIT",
+          "description": "Per-process daily USDC spend ceiling for x402 tools, as a decimal such as 0.25. Empty or invalid values use the default of 0.25. Each process applies its own limit to the shared ~/.rubric/x402-spend.json ledger.",
+          "isRequired": false,
+          "isSecret": false,
           "format": "string"
         }
       ]

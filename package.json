@@ -1,33 +1,26 @@
 {
   "name": "@rubric-protocol/mcp-server",
-  "version": "2.1.0",
-  "description": "AI compliance attestation \u2014 PQ-signed, HCS-anchored decision records. EU AI Act, SR 11-7, HIPAA, NIST AI RMF. Free local tier, no key required.",
+  "version": "2.2.4",
+  "description": "Rubric Protocol MCP server — attest, verify, ZK proofs, compliance tagging, framework detection. Free local tier, Hedera mainnet anchoring with API key.",
+  "type": "module",
   "bin": {
     "rubric-mcp": "./dist/index.js"
   },
-  "main": "dist/index.js",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ],
   "scripts": {
-    "build": "tsup src/index.ts --format cjs --dts --no-splitting",
-    "dev": "tsx src/index.ts",
-    "prepublishOnly": "npm run build"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "zod": "^3.22.0"
-  },
-  "devDependencies": {
-    "tsup": "^8.0.0",
-    "tsx": "^4.0.0",
-    "typescript": "^5.0.0"
-  },
-  "mcpName": "io.github.0xsims/rubric-protocol",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/0xsims/rubric-mcp-server.git",
-    "source": "github"
+    "build": "tsc && chmod +x dist/index.js",
+    "prepublishOnly": "npm run build",
+    "test": "npm run build && node --test tests/*.test.mjs"
   },
   "keywords": [
     "mcp",
+    "rubric",
     "attestation",
     "compliance",
     "eu-ai-act",
@@ -35,5 +28,31 @@
     "hedera",
     "post-quantum",
     "ai-governance"
-  ]
+  ],
+  "author": "Scott Sims <scott@rubric-protocol.com>",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tenprint-ai/tenprint-mcp.git"
+  },
+  "homepage": "https://tenprint.ai",
+  "bugs": {
+    "url": "https://github.com/tenprint-ai/tenprint-mcp/issues"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@x402/core": "^2.28.0",
+    "@x402/evm": "^2.28.0",
+    "@x402/fetch": "^2.28.0",
+    "viem": "^2.55.10",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "mcpName": "io.github.0xsims/rubric-mcp"
 }

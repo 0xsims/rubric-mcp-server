@@ -349,12 +349,16 @@ function isEnabled(name: string, transport: TransportMode): boolean {
   return ENABLED_TOOLS.has(name);
 }
 
-export function listEnabledTools(transport: TransportMode = processTransport === "http" ? "http" : "stdio") {
+export function listEnabledTools(transport: TransportMode = processTransport === "stdio" ? "stdio" : "http") {
   return TOOLS.filter((t) => isEnabled(t.name, transport));
 }
 
+/**
+ * Payments and the host API key are off unless the caller opts in with `{ transport: "stdio" }`.
+ * The stdio CLI is the only entry that does that. An embedded `createMcpServer()` stays on the deny path.
+ */
 export function createMcpServer(options?: { transport?: TransportMode }): Server {
-  const transport = options?.transport ?? (processTransport === "http" ? "http" : "stdio");
+  const transport: TransportMode = options?.transport === "stdio" ? "stdio" : "http";
   const server = new Server(
     { name: SERVER_NAME, version: PKG.version },
     { capabilities: { tools: {} } }
@@ -375,6 +379,7 @@ async function handleCallTool(request: { params: { name: string; arguments?: Rec
     if (!ENABLED_TOOLS.has(name)) {
       return { content: [{ type: "text", text: `Error: tool ${name} is not enabled.` }], isError: true };
     }
+    // allowPayments is the swap point for the paid path. Only an explicit stdio server sets it.
     const x = await dispatchX402(name, a, { allowPayments: transport === "stdio" });
     if (x !== null) {
       return { content: [{ type: "text", text: JSON.stringify(x, null, 2) }] };

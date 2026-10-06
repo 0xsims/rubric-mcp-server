@@ -79,7 +79,6 @@ function run(env, input) {
       env: {
         ...process.env,
         HOME: home,
-        RUBRIC_X402_SPEND_FILE: join(home, "spend.json"),
         RUBRIC_WALLET_KEY: `0x${randomBytes(32).toString("hex")}`,
         RUBRIC_X402_CONFIRM: "",
         TENPRINT_API_KEY: "",
@@ -156,28 +155,88 @@ test("a non-200 response still counts toward x402 spend", async () => {
   }
 });
 
-test("RUBRIC_X402_CONFIRM returns a quote and pays only on the confirming call", async () => {
+test("RUBRIC_X402_CONFIRM quote is bound to the same tool, arguments, and price, and is single use", async () => {
   const paid = await startPaid({ amount: 1_000, paidStatus: 200 });
   try {
-    const home = mkdtempSync(join(tmpdir(), "tenprint-x402-"));
-    const key = `0x${randomBytes(32).toString("hex")}`;
-    const env = {
+    const [quote, wrongTool, requoted, wrongArgs, fresh, confirmed, reused] = await run({
       RUBRIC_BASE_URL: paid.url,
       RUBRIC_X402_DAILY_LIMIT: "1.00",
       RUBRIC_X402_CONFIRM: "1",
-      RUBRIC_WALLET_KEY: key,
-      HOME: home,
-      RUBRIC_X402_SPEND_FILE: join(home, "spend.json"),
-    };
-    const quote = await run(env, { name: "hedera_fact", args: { fact: "nodes" } });
+    }, {
+      sequence: [
+        { name: "hedera_fact", args: { fact: "nodes" } },
+        { name: "screen_entity", args: { name: "example", confirm: true, quote_id: "$quote" } },
+        { name: "hedera_fact", args: { fact: "nodes" } },
+        { name: "hedera_fact", args: { fact: "supply", confirm: true, quote_id: "$quote" } },
+        { name: "hedera_fact", args: { fact: "nodes" } },
+        { name: "hedera_fact", args: { fact: "nodes", confirm: true, quote_id: "$quote" } },
+        { name: "hedera_fact", args: { fact: "nodes", confirm: true, quote_id: "$quote" } },
+      ],
+    });
     assert.equal(quote.confirmationRequired, true);
     assert.equal(quote.maxPriceUsd, 0.001);
-    assert.equal(paid.requests(), 0);
-    assert.equal(paid.signed(), 0);
-    const confirmed = await run(env, { name: "hedera_fact", args: { fact: "nodes", confirm: true } });
-    assert.equal(confirmed.httpStatus, 200);
-    assert.equal(paid.signed(), 1);
+    assert.equal(quote.tool, "hedera_fact");
+    assert.equal(quote.network, "eip155:8453");
+    assert.equal(typeof quote.quoteId, "string");
+    assert.equal(quote.quoteId.length > 0, true);
+    assert.equal(wrongTool.error, "CONFIRMATION_INVALID");
+    assert.equal(requoted.confirmationRequired, true);
+    assert.notEqual(requoted.quoteId, quote.quoteId);
+    assert.equal(wrongArgs.error, "CONFIRMATION_INVALID");
+    assert.equal(fresh.confirmationRequired, true);
+    assert.notEqual(fresh.quoteId, requoted.quoteId);
+    assert.equal(confirmed.httpStatus, 200, JSON.stringify(confirmed));
     assert.equal(confirmed.spentTodayUsd, 0.001);
+    assert.equal(reused.error, "CONFIRMATION_INVALID");
+    assert.equal(paid.signed(), 1);
+    assert.equal(paid.requests(), 2);
+  } finally {
+    await paid.close();
+  }
+});
+
+test("RUBRIC_X402_CONFIRM quote expires and a confirm with no quote does not pay", async () => {
+  const paid = await startPaid({ amount: 1_000, paidStatus: 200 });
+  try {
+    const [quote, expired] = await run({
+      RUBRIC_BASE_URL: paid.url,
+      RUBRIC_X402_DAILY_LIMIT: "1.00",
+      RUBRIC_X402_CONFIRM: "1",
+      RUBRIC_X402_CONFIRM_TTL_MS: "200",
+    }, {
+      sequence: [
+        { name: "hedera_fact", args: { fact: "nodes" } },
+        { delayMs: 400, name: "hedera_fact", args: { fact: "nodes", confirm: true, quote_id: "$quote" } },
+      ],
+    });
+    assert.equal(quote.confirmationRequired, true);
+    assert.equal(expired.error, "CONFIRMATION_INVALID");
+
+    const missing = await run({
+      RUBRIC_BASE_URL: paid.url,
+      RUBRIC_X402_DAILY_LIMIT: "1.00",
+      RUBRIC_X402_CONFIRM: "1",
+    }, { name: "hedera_fact", args: { fact: "nodes", confirm: true } });
+    assert.equal(missing.error, "CONFIRMATION_INVALID");
+    assert.equal(paid.signed(), 0);
+    assert.equal(paid.requests(), 0);
+  } finally {
+    await paid.close();
+  }
+});
+
+test("an empty RUBRIC_X402_DAILY_LIMIT uses the default limit", async () => {
+  const paid = await startPaid({ amount: 1_000, paidStatus: 200 });
+  try {
+    const result = await run({
+      RUBRIC_BASE_URL: paid.url,
+      RUBRIC_X402_DAILY_LIMIT: "",
+    }, { name: "hedera_fact", args: { fact: "supply" } });
+    assert.equal(paid.signed(), 1);
+    assert.equal(result.httpStatus, 200, JSON.stringify(result));
+    assert.equal(result.error, undefined);
+    assert.equal(result.spentTodayUsd, 0.001);
+    assert.equal(result.dailyLimitUsd, 1);
   } finally {
     await paid.close();
   }

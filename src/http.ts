@@ -59,7 +59,7 @@ function stripPort(host: string): string {
 
 function allowedHostNames(): string[] {
   const configured = csvEnv("TENPRINT_ALLOWED_HOSTS");
-  return configured.length > 0 ? configured : ["127.0.0.1", "localhost", "::1"];
+  return configured.length > 0 ? configured : ["127.0.0.1", "localhost", "::1", "[::1]"];
 }
 
 function hostAllowed(host: string): boolean {
@@ -123,15 +123,64 @@ function rateLimitPerMinute(): number {
   return Math.floor(raw);
 }
 
+function bucketCap(): number {
+  const raw = Number(process.env.TENPRINT_RATE_BUCKET_CAP ?? "4096");
+  if (!Number.isFinite(raw) || raw < 1) return 4096;
+  return Math.floor(raw);
+}
+
+/** Off unless TENPRINT_TRUSTED_PROXY is 1/true/on, or a comma-separated list of proxy addresses. */
+function trustedProxyEnabled(remote: string): boolean {
+  const raw = (process.env.TENPRINT_TRUSTED_PROXY ?? "").trim().toLowerCase();
+  if (!raw || raw === "0" || raw === "false" || raw === "off") return false;
+  if (raw === "1" || raw === "true" || raw === "on") return true;
+  return raw.split(",").map((part) => part.trim()).filter(Boolean).includes(remote);
+}
+
+function rateLimitAddress(req: IncomingMessage): string {
+  const remote = req.socket.remoteAddress ?? "unknown";
+  if (!trustedProxyEnabled(remote)) return remote;
+  const hops = headerValue(req.headers["x-forwarded-for"]).split(",").map((part) => part.trim()).filter(Boolean);
+  return hops.length > 0 ? hops[hops.length - 1] : remote;
+}
+
+let rateChecks = 0;
+
+function sweepBuckets(now: number): void {
+  rateChecks += 1;
+  if (rateChecks % 64 !== 0 && hits.size <= bucketCap()) return;
+  for (const [key, times] of hits) {
+    const recent = times.filter((at) => now - at < RATE_WINDOW_MS);
+    if (recent.length === 0) hits.delete(key);
+    else hits.set(key, recent);
+  }
+  while (hits.size > bucketCap()) {
+    const oldest = hits.keys().next().value;
+    if (oldest === undefined) break;
+    hits.delete(oldest);
+  }
+}
+
+function rememberBucket(bucket: string, recent: number[]): void {
+  hits.delete(bucket);
+  hits.set(bucket, recent);
+  while (hits.size > bucketCap()) {
+    const oldest = hits.keys().next().value;
+    if (oldest === undefined || oldest === bucket) break;
+    hits.delete(oldest);
+  }
+}
+
 function rateLimited(bucket: string): boolean {
   const now = Date.now();
+  sweepBuckets(now);
   const recent = (hits.get(bucket) ?? []).filter((at) => now - at < RATE_WINDOW_MS);
   if (recent.length >= rateLimitPerMinute()) {
-    hits.set(bucket, recent);
+    rememberBucket(bucket, recent);
     return true;
   }
   recent.push(now);
-  hits.set(bucket, recent);
+  rememberBucket(bucket, recent);
   return false;
 }
 
@@ -177,7 +226,7 @@ function headersAllowed(req: IncomingMessage, res: ServerResponse): boolean {
 }
 
 async function handleMcp(req: IncomingMessage, res: ServerResponse, boundPort: number): Promise<void> {
-  const ip = req.socket.remoteAddress ?? "unknown";
+  const ip = rateLimitAddress(req);
   if (rateLimited(`ip:${ip}`)) {
     sendJson(res, 429, { error: "rate limit exceeded" });
     return;

@@ -1,9 +1,14 @@
 // x402 paid evidence tools. The wallet key is used only when the caller passes
 // allowPayments (stdio). HTTP must pass allowPayments: false and never reaches signing.
 import type { PaymentPolicy } from "@x402/core/client";
+import { randomUUID } from "crypto";
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
+
+// Spend-ledger call sites. src/x402-spend.ts will replace reserveSpend and releaseSpend
+// verbatim when the shared module lands. paidCall is the only caller. The ledger path
+// is ~/.rubric/x402-spend.json. There is no path override.
 
 const BASE_NETWORK = "eip155:8453";
 const BASE_NETWORK_V1 = "base";
@@ -43,8 +48,6 @@ function withBudgetLock<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 function spendFile(): string {
-  const override = process.env.RUBRIC_X402_SPEND_FILE;
-  if (override && override.trim()) return override;
   return join(homedir(), ".rubric", "x402-spend.json");
 }
 
@@ -53,7 +56,8 @@ function todayUtc(): string {
 }
 
 function dailyLimitMicro(): number {
-  const raw = process.env.RUBRIC_X402_DAILY_LIMIT ?? "1";
+  const raw = (process.env.RUBRIC_X402_DAILY_LIMIT ?? "").trim();
+  if (!raw) return 1_000_000;
   const value = Number(raw);
   if (!Number.isFinite(value) || value < 0) return 1_000_000;
   return Math.round(value * 1e6);
@@ -86,7 +90,7 @@ function writeSpend(state: SpendState): void {
   writeFileSync(file, JSON.stringify(state));
 }
 
-async function reserve(micro: number): Promise<{ ok: boolean; spentMicro: number; limitMicro: number; date: string }> {
+async function reserveSpend(micro: number): Promise<{ ok: boolean; spentMicro: number; limitMicro: number; date: string }> {
   return withBudgetLock(async () => {
     const limitMicro = dailyLimitMicro();
     const state = readSpend();
@@ -99,7 +103,7 @@ async function reserve(micro: number): Promise<{ ok: boolean; spentMicro: number
   });
 }
 
-async function release(micro: number, date: string): Promise<number> {
+async function releaseSpend(micro: number, date: string): Promise<number> {
   return withBudgetLock(async () => {
     const state = readSpend();
     if (state.date === date) state.spentMicro = Math.max(0, state.spentMicro - micro);
@@ -119,7 +123,7 @@ function walletKey(): string {
 
 const NO_WALLET_MSG = {
   paymentConfigured: false,
-  howTo: "These tools pay per call in USDC on Base. Use a dedicated low-balance wallet, never a main wallet. Set RUBRIC_WALLET_KEY to that key. Optional RUBRIC_X402_DAILY_LIMIT (default 1.00 USD/day) and RUBRIC_X402_CONFIRM=1 to require a second confirming call before paying.",
+  howTo: "These tools pay per call in USDC on Base. Use a dedicated low-balance wallet, never a main wallet. Set RUBRIC_WALLET_KEY to that key. Optional RUBRIC_X402_DAILY_LIMIT (default 1.00 USD/day; the shared spend module will lower the default to 0.25). Do not auto-approve these tools in the MCP client. RUBRIC_X402_CONFIRM=1 is a speed bump the model can set itself, not a human approval.",
 };
 
 function requirementAmount(version: number, requirement: PaymentRequirement): bigint | null {
@@ -184,7 +188,7 @@ async function paidCall(tool: string, path: string, method: string, body?: unkno
   const maxUsd = microToUsd(maxMicro);
   if (!walletKey()) return NO_WALLET_MSG;
   const apiBase = (process.env.RUBRIC_BASE_URL ?? "https://rubric-protocol.com").replace(/[/]$/, "");
-  const held = await reserve(maxMicro);
+  const held = await reserveSpend(maxMicro);
   if (!held.ok) {
     return {
       error: "DAILY_BUDGET_EXCEEDED",
@@ -219,7 +223,7 @@ async function paidCall(tool: string, path: string, method: string, body?: unkno
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (!signed) {
-      const spentMicro = await release(maxMicro, held.date);
+      const spentMicro = await releaseSpend(maxMicro, held.date);
       return {
         error: "PAYMENT_REJECTED",
         message,
@@ -239,13 +243,82 @@ async function paidCall(tool: string, path: string, method: string, body?: unkno
   }
 }
 
+const QUOTE_CAP = 256;
+
+interface PendingQuote {
+  id: string;
+  tool: string;
+  argsKey: string;
+  maxPriceUsd: number;
+  expiresAt: number;
+}
+
+const pendingQuotes = new Map<string, PendingQuote>();
+
+function quoteTtlMs(): number {
+  const raw = (process.env.RUBRIC_X402_CONFIRM_TTL_MS ?? "").trim();
+  if (!raw) return 120_000;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return 120_000;
+  return Math.min(value, 600_000);
+}
+
+function canonicalArgs(args: Record<string, unknown>): string {
+  const skip = new Set(["confirm", "quote_id"]);
+  const keys = Object.keys(args).filter((key) => !skip.has(key) && args[key] !== undefined).sort();
+  const normalized: Record<string, unknown> = {};
+  for (const key of keys) normalized[key] = args[key];
+  return JSON.stringify(normalized);
+}
+
+function pruneQuotes(now = Date.now()): void {
+  for (const [id, quote] of pendingQuotes) {
+    if (quote.expiresAt <= now) pendingQuotes.delete(id);
+  }
+  while (pendingQuotes.size > QUOTE_CAP) {
+    const oldest = pendingQuotes.keys().next().value;
+    if (oldest === undefined) break;
+    pendingQuotes.delete(oldest);
+  }
+}
+
+function issueQuote(tool: string, args: Record<string, unknown>, maxPriceUsd: number): PendingQuote {
+  pruneQuotes();
+  const quote: PendingQuote = {
+    id: randomUUID(),
+    tool,
+    argsKey: canonicalArgs(args),
+    maxPriceUsd,
+    expiresAt: Date.now() + quoteTtlMs(),
+  };
+  pendingQuotes.set(quote.id, quote);
+  return quote;
+}
+
+function takeQuote(tool: string, args: Record<string, unknown>, maxPriceUsd: number): PendingQuote | undefined {
+  const now = Date.now();
+  pruneQuotes(now);
+  const id = typeof args.quote_id === "string" ? args.quote_id : "";
+  const quote = id ? pendingQuotes.get(id) : undefined;
+  if (!quote) return undefined;
+  pendingQuotes.delete(id);
+  if (quote.expiresAt <= now) return undefined;
+  if (quote.tool !== tool || quote.argsKey !== canonicalArgs(args) || quote.maxPriceUsd !== maxPriceUsd) return undefined;
+  return quote;
+}
+
 const confirmField = {
   type: "boolean",
-  description: "When RUBRIC_X402_CONFIRM=1, the first call without confirm returns the tool maximum and does not pay. Pass true to pay.",
+  description: "When RUBRIC_X402_CONFIRM=1, omit this to get a one-time quote. The model can set it, so this is not a human approval. Pass true only with the quote_id from that quote.",
+};
+
+const quoteField = {
+  type: "string",
+  description: "quoteId from the previous confirmationRequired response. Same tool and arguments, single use, expires quickly.",
 };
 
 function withConfirm(schema: { type: string; properties: Record<string, unknown>; required?: string[] }) {
-  return { ...schema, properties: { ...schema.properties, confirm: confirmField } };
+  return { ...schema, properties: { ...schema.properties, confirm: confirmField, quote_id: quoteField } };
 }
 
 export const X402_TOOLS = [
@@ -265,16 +338,30 @@ export async function dispatchX402(name: string, a: Record<string, unknown>, opt
   const known = Object.prototype.hasOwnProperty.call(MAX_MICRO, name);
   if (!known) return null;
   if (opts?.allowPayments !== true) return { error: "X402_DISABLED_IN_HTTP_MODE" };
-  if (confirmRequired() && a.confirm !== true) {
-    return {
-      confirmationRequired: true,
-      tool: name,
-      maxPriceUsd: microToUsd(MAX_MICRO[name] ?? 0),
-      network: BASE_NETWORK,
-      asset: USDC_BASE,
-      payTo: PAYTO,
-      note: "RUBRIC_X402_CONFIRM is set. No payment was made. Call again with confirm: true to pay up to the tool maximum.",
-    };
+  if (confirmRequired()) {
+    const maxPriceUsd = microToUsd(MAX_MICRO[name] ?? 0);
+    if (a.confirm !== true) {
+      const quote = issueQuote(name, a, maxPriceUsd);
+      return {
+        confirmationRequired: true,
+        quoteId: quote.id,
+        tool: name,
+        maxPriceUsd,
+        network: BASE_NETWORK,
+        asset: USDC_BASE,
+        payTo: PAYTO,
+        expiresAt: new Date(quote.expiresAt).toISOString(),
+        note: "Speed bump only. The model sets confirm, so this is not human approval. Call the same tool with the same arguments, confirm: true, and this quoteId before it expires. The quote works once. No payment was made.",
+      };
+    }
+    if (!takeQuote(name, a, maxPriceUsd)) {
+      return {
+        error: "CONFIRMATION_INVALID",
+        tool: name,
+        maxPriceUsd,
+        note: "No matching unused quote for this tool, arguments, and price. Quotes are single use and expire quickly. No payment was made.",
+      };
+    }
   }
   switch (name) {
     case "screen_entity": return paidCall(name, "/v1/x402/attested-screening", "POST", { name: a.name, queryId: a.query_id });

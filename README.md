@@ -69,23 +69,24 @@ Six tools that pay per call in USDC on Base via the x402 protocol. No TenPrint a
 
 1. Create a **dedicated** wallet and fund it with a small amount of USDC on **Base**. Use that wallet only for these tool payments. Do not put `RUBRIC_WALLET_KEY` on a main wallet or any wallet that holds funds you cannot afford to lose.
 2. Set `RUBRIC_WALLET_KEY` to that wallet's private key in the MCP client config that launches this server.
-3. Optional: `RUBRIC_X402_DAILY_LIMIT` (default `1.00` USD/day). Optional: `RUBRIC_X402_CONFIRM=1`.
+3. Optional: `RUBRIC_X402_DAILY_LIMIT` (USD/day). The default is `1.00`. An empty value is unset and uses that default; it does not mean zero. Once the shared spend module lands, the default becomes `$0.25`. Optional: `RUBRIC_X402_CONFIRM=1`, described below. It is a speed bump, not a control.
 
 ### Before you put a key in a client config
 
 - The private key sits in plaintext in the MCP client config file. Anyone who can read that file can spend the wallet.
-- Prompt injection can ask the client to call a paid tool. With the default settings there is no per-call confirmation, so a injected instruction can spend USDC up to the daily limit.
-- Set `RUBRIC_X402_CONFIRM=1` to require a second call. The first call returns `confirmationRequired` and the tool maximum and does not contact the network. Call the same tool again with `confirm: true` to pay. The tool maximum and the daily limit still apply.
+- Do not auto-approve the six paid tools (`screen_entity`, `wallet_record`, `agent_record`, `attested_inference`, `hedera_fact`, `verify_audit`) in the MCP client. The client's own per-tool prompt is what asks you before a payment. Auto-approve lets the model spend up to the daily limit without that prompt.
+- Prompt injection can ask the client to call a paid tool. With the default settings there is no per-call confirmation, so an injected instruction can spend USDC up to the daily limit.
+- `RUBRIC_X402_CONFIRM=1` is a speed bump, not protection. The model sets `confirm` itself, so this does not stop prompt injection and it is not a human approval. The first call returns `confirmationRequired`, a `quoteId`, the tool name, and the tool maximum, and it does not contact the network. A later call pays only when it is the same tool, the same arguments, `confirm: true`, and that `quoteId`. The quote is single use, expires after two minutes (`RUBRIC_X402_CONFIRM_TTL_MS`, default 120000; an empty value keeps that default), and lives only in this process.
 - `RUBRIC_BASE_URL` chooses the API host. If it points somewhere else, that host is who this process asks for payment requirements. Keep it on an API you trust.
 
 ### What this process enforces
 
 - A payment is signed only for Base (`eip155:8453`, or the v1 network name `base`), asset USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, and payTo `0xaB6731A0BcDf511c2842C768a03448075aB654ca`, and only when the amount is at or below that tool's documented maximum. The check is on the requirements that would be signed.
-- The daily limit reserves that tool maximum before signing. Once a payment is submitted, it counts toward the limit whatever HTTP status comes back. If signing never happens, the reservation is released. The counter resets at 00:00 UTC.
+- The daily limit reserves that tool maximum before signing. Once a payment header is sent, the reservation counts toward the limit whatever HTTP status comes back. If signing throws before a payment header is sent, the reservation is released. An HTTP response that never carried a payment still keeps the reservation; the shared spend module will release those. The counter resets at 00:00 UTC. The ledger file is `~/.rubric/x402-spend.json`. There is no environment variable that moves it.
 - No wallet key: the tool returns setup guidance and does not pay.
 - Paid responses include `spentTodayUsd`. That number is what this process has reserved, not a promise about charges made outside it.
 
-x402 tools are stdio-only. HTTP mode does not list them, does not call them, and does not sign with `RUBRIC_WALLET_KEY` or `TENPRINT_WALLET_KEY`.
+x402 tools are stdio-only. HTTP mode does not list them, does not call them, and does not sign with `RUBRIC_WALLET_KEY` or `TENPRINT_WALLET_KEY`. An embedded `createMcpServer()` is on that same deny path: it does not sign payments and it does not forward `TENPRINT_API_KEY` or `RUBRIC_API_KEY`. Those turn on only when the caller passes `{ transport: "stdio" }`. The stdio CLI is the only entry in this package that does that.
 
 ## Module configuration
 
@@ -140,8 +141,8 @@ The npm bin stays on stdio. Requires Node.js 22 or newer. To serve a remote endp
 - `POST /mcp` — MCP Streamable HTTP. `initialize` and `tools/list` need no credentials, so a directory can scan the server. `tools/call` requires a key on that request and otherwise returns HTTP 401 with a JSON-RPC error (`code` -32000, `message` "Unauthorized"). `GET` and `DELETE /mcp` return 405.
 - Send the key as `Authorization: Bearer <key>` or `x-api-key: <key>`. That request key is what is sent upstream as `x-api-key`. `TENPRINT_API_KEY` and `RUBRIC_API_KEY` apply to stdio only. They do not authorize HTTP `tools/call`, so a hosted process cannot spend its own key for an anonymous caller.
 - x402 paid tools are not listed or callable whenever the HTTP server is running, including when `startHttpServer` is imported directly. `RUBRIC_MCP_MODULES` does not turn them back on. `RUBRIC_WALLET_KEY` and `TENPRINT_WALLET_KEY` are not used to sign or pay.
-- Requests with no `Origin` are accepted. A request that sends `Origin` is rejected unless that value is listed in `TENPRINT_ALLOWED_ORIGINS` (comma-separated). `Host` must be `localhost`, `127.0.0.1`, or `::1`, or a value listed in `TENPRINT_ALLOWED_HOSTS`. Set the public hostname there when a reverse proxy forwards one. The server does not send `Access-Control-Allow-Origin: *`.
-- Request bodies are limited to 1 MB. `/mcp` is rate limited per IP and per API key (default 120 requests per minute, `TENPRINT_RATE_LIMIT_PER_MINUTE`).
+- Requests with no `Origin` are accepted. A request that sends `Origin` is rejected unless that value is listed in `TENPRINT_ALLOWED_ORIGINS` (comma-separated). `Host` must be `localhost`, `127.0.0.1`, `::1`, or `[::1]` (including `[::1]:port`), or a value listed in `TENPRINT_ALLOWED_HOSTS`. Set the public hostname there when a reverse proxy forwards one. The server does not send `Access-Control-Allow-Origin: *`.
+- Request bodies are limited to 1 MB. `/mcp` is rate limited per socket address and per API key (default 120 requests per minute, `TENPRINT_RATE_LIMIT_PER_MINUTE`). `TENPRINT_TRUSTED_PROXY` is off by default, so `X-Forwarded-For` is ignored and every caller behind one proxy shares the proxy's bucket. Set it to `1` only when every connection comes from a reverse proxy you trust; the bucket then uses the last `X-Forwarded-For` hop, the address that proxy appended. A comma-separated list trusts only those proxy addresses. Idle buckets are dropped, and the table is capped at `TENPRINT_RATE_BUCKET_CAP` (default 4096).
 - `GET /health` — `{ "status": "ok" }`
 - `GET /.well-known/mcp/server-card.json` — server card. Its `tools` array is the same list `tools/list` returns for this process. `authentication.required` is true because `tools/call` requires a key. `initialize` and `tools/list` stay open.
 
@@ -154,9 +155,14 @@ The image runs the HTTP transport, not stdio, and listens on `0.0.0.0`. `RUBRIC_
 
 `POST http://127.0.0.1:8080/mcp` then serves `initialize` and `tools/list` with no key. `tools/call` needs `Authorization: Bearer <key>` or `x-api-key` on the request. Setting `TENPRINT_API_KEY` on the container does not open `tools/call`.
 
+## Not published yet
+
+- **License.** The owner has not chosen one. There is no `LICENSE` file. `package.json` still says `SEE LICENSE IN LICENSE`. Do not treat this package as licensed for reuse until that file exists.
+- **Repository and registry.** The names below are the intended ones after transfer. `github.com/tenprint-ai/tenprint-mcp` does not exist yet. `ai.tenprint/tenprint` still needs DNS or HTTP proof for the MCP registry, and `@tenprint/mcp-server` is not published. Do not treat those URLs as live.
+
 ## Links
 
 - Homepage: https://tenprint.ai
-- Repository: https://github.com/tenprint-ai/tenprint-mcp
-- Issues: https://github.com/tenprint-ai/tenprint-mcp/issues
+- Repository (intended, not created yet): https://github.com/tenprint-ai/tenprint-mcp
+- Issues (intended, not created yet): https://github.com/tenprint-ai/tenprint-mcp/issues
 - Changelog: ./CHANGELOG.md

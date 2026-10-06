@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import http from "node:http";
 import { createServer } from "node:net";
 import { after, before, test } from "node:test";
 import { dirname, join } from "node:path";
@@ -316,6 +317,86 @@ test("HTTP rate limit returns 429", async () => {
     assert.equal(third.status, 429);
   } finally {
     envChild.kill();
+  }
+});
+
+function rawStatus(port, { method = "GET", path = "/health", headers = {}, body = "" } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      host: "127.0.0.1",
+      port,
+      method,
+      path,
+      headers: { host: `127.0.0.1:${port}`, ...headers },
+    }, (res) => {
+      res.resume();
+      res.on("end", () => resolve(res.statusCode ?? 0));
+    });
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
+test("bracketed IPv6 Host [::1] is allowed", async () => {
+  const status = await rawStatus(port, { headers: { host: `[::1]:${port}` } });
+  assert.equal(status, 200);
+});
+
+test("rate limit ignores X-Forwarded-For unless the proxy is trusted, and caps buckets", async () => {
+  const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+  const post = (target, xff) => rawStatus(target, {
+    method: "POST",
+    path: "/mcp",
+    headers: {
+      host: `127.0.0.1:${target}`,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      "content-length": String(Buffer.byteLength(body)),
+      "x-forwarded-for": xff,
+    },
+    body,
+  });
+
+  const sharedPort = await freePort();
+  const shared = startServer(sharedPort, { TENPRINT_RATE_LIMIT_PER_MINUTE: "2" });
+  const trustedPort = await freePort();
+  const trusted = startServer(trustedPort, {
+    TENPRINT_TRUSTED_PROXY: "1",
+    TENPRINT_RATE_LIMIT_PER_MINUTE: "1",
+    TENPRINT_RATE_BUCKET_CAP: "2",
+  });
+  const unlistedPort = await freePort();
+  const unlisted = startServer(unlistedPort, {
+    TENPRINT_TRUSTED_PROXY: "10.0.0.8",
+    TENPRINT_RATE_LIMIT_PER_MINUTE: "1",
+  });
+  try {
+    await waitForHealth(sharedPort, shared);
+    await waitForHealth(trustedPort, trusted);
+    await waitForHealth(unlistedPort, unlisted);
+
+    assert.deepEqual([
+      await post(sharedPort, "1.1.1.1"),
+      await post(sharedPort, "2.2.2.2"),
+      await post(sharedPort, "3.3.3.3"),
+    ], [200, 200, 429]);
+
+    assert.deepEqual([
+      await post(trustedPort, "9.9.9.9, 1.1.1.1"),
+      await post(trustedPort, "9.9.9.9"),
+      await post(trustedPort, "1.1.1.1"),
+      await post(trustedPort, "8.8.8.8"),
+      await post(trustedPort, "9.9.9.9"),
+    ], [200, 200, 429, 200, 200]);
+
+    assert.deepEqual([
+      await post(unlistedPort, "1.1.1.1"),
+      await post(unlistedPort, "2.2.2.2"),
+    ], [200, 429]);
+  } finally {
+    shared.kill();
+    trusted.kill();
+    unlisted.kill();
   }
 });
 

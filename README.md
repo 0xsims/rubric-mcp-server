@@ -66,17 +66,25 @@ signed, Hedera-anchored attestation ID your agent can cite later.
 
 ### Setup (3 steps)
 
-1. Create a wallet and fund it with a few dollars of USDC on **Base** (Coinbase -> withdraw USDC -> network: Base)
-2. Set `RUBRIC_WALLET_KEY` to the wallet's private key in your MCP server environment
+1. Create a dedicated wallet and fund it with a small USDC balance on **Base** (Coinbase -> withdraw USDC -> network: Base)
+2. Set `RUBRIC_WALLET_KEY` to that wallet's private key in your MCP server environment
 3. Optional: `RUBRIC_X402_DAILY_LIMIT` (default `1.00` USD/day)
 
-### Money safety, by design
+### Spend controls
 
-- **No wallet key?** Paid tools return setup guidance - never errors, never charges.
-- **Daily ceiling.** Spending stops at your limit; the tool returns a budget error your agent can read. Resets 00:00 UTC.
-- **Price protection.** Before paying, each tool checks the server's quoted price against its documented maximum and refuses anything higher - even we cannot overcharge you.
-- **Full accounting.** Every paid response includes `spentTodayUsd`.
-- Your key never leaves the MCP process. A failed operation is never charged.
+What this client checks before it signs:
+
+- **No wallet key.** Paid tools return setup guidance and do not sign a payment.
+- **Pinned payment.** A requirement is signed only for USDC on Base (`eip155:8453`), only to the Rubric payee, and only at or below that tool's price in the table above. Another network, asset, recipient, or a higher amount is refused before signing.
+- **Daily limit.** The price of the requirement being signed is reserved against `RUBRIC_X402_DAILY_LIMIT` before signing. Reservation uses an in-process lock and an atomic update of `~/.rubric/x402-spend.json`. The reserved amount counts toward the limit even when the HTTP response is not 200, because the authorization was already signed. The total resets at 00:00 UTC.
+- A response includes `spentTodayUsd` and `dailyLimitUsd`.
+
+### Wallet warning
+
+- Use a dedicated wallet that holds only a low balance. The key can sign a USDC transfer up to the balance in that wallet.
+- The private key sits in plaintext in the MCP client config.
+- The model can call a paid tool by itself, and a prompt injection can trigger a payment.
+- `RUBRIC_BASE_URL` can be redirected. Paid requests are sent to whatever host that variable names.
 
 Catalog, prices, and terms are machine-readable at [x402.json](https://rubric-protocol.com/.well-known/x402.json) and [openapi.json](https://rubric-protocol.com/openapi.json).
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.2.4
+
+### Security
+- x402 payments are signed only for USDC on Base (`eip155:8453`) to the Rubric payee. A requirement with another network, asset, or recipient is refused before signing.
+- Each tool's maximum price is enforced on the payment requirements that would actually be signed. A cheaper quote cannot be followed by a higher charge.
+- The daily spend limit (`RUBRIC_X402_DAILY_LIMIT`, default $1.00) is reserved under an in-process lock and an atomic spend-file update before signing, so parallel calls cannot exceed it.
+- Spend is recorded when the payment is signed, including when the response is not HTTP 200.
+- `@x402/core`, `@x402/fetch`, and `@x402/evm` now require `^2.28.0`.
+
+### Changed
+- `repository` is `git+https://github.com/tenprint-ai/tenprint-mcp.git`, `homepage` is `https://tenprint.ai`, and `bugs` is `https://github.com/tenprint-ai/tenprint-mcp/issues`.
+
 ## 2.0.1
 
 ### Fixed

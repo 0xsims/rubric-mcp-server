@@ -27,17 +27,13 @@ const requestContext = new AsyncLocalStorage<string>();
 
 export const SERVER_NAME = "TenPrint";
 
-/** Env key, overridden by a per-request key while handling an HTTP tools/call. */
+/** Stdio uses the environment key. An HTTP request runs with the caller's key when one was sent. */
 function activeApiKey(): string {
   return requestContext.getStore() ?? API_KEY;
 }
 
 function isLocalMode(): boolean {
   return !activeApiKey();
-}
-
-export function hasConfiguredApiKey(): boolean {
-  return Boolean(API_KEY);
 }
 
 export function runWithApiKey<T>(apiKey: string, fn: () => Promise<T>): Promise<T> {

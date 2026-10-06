@@ -147,7 +147,7 @@ test("Authorization bearer and x-api-key allow tools/call", async () => {
   assert.equal(header.body.error, undefined);
 });
 
-test("TENPRINT_API_KEY in the environment allows tools/call without a request header", async () => {
+test("HTTP tools/call with no request key is refused even when TENPRINT_API_KEY is set", async () => {
   const envPort = await freePort();
   const envChild = startServer(envPort, { TENPRINT_API_KEY: "env-key" });
   try {
@@ -156,9 +156,27 @@ test("TENPRINT_API_KEY in the environment allows tools/call without a request he
       name: "cost_estimate",
       arguments: { decisions_per_day: 10 },
     });
-    assert.equal(call.status, 200, JSON.stringify(call.body));
-    const payload = JSON.parse(call.body.result.content[0].text);
-    assert.equal(payload.tier, "Standard");
+    assert.equal(call.status, 401);
+    assert.equal(call.body.result, undefined);
+    assert.equal(call.body.error.code, -32000);
+    assert.equal(call.body.error.message, "Unauthorized");
+    assert.equal(call.body.error.data.reason, "api_key_required");
+  } finally {
+    envChild.kill();
+  }
+});
+
+test("HTTP tools/call with no request key is refused even when RUBRIC_API_KEY is set", async () => {
+  const envPort = await freePort();
+  const envChild = startServer(envPort, { RUBRIC_API_KEY: "legacy-env-key" });
+  try {
+    await waitForHealth(envPort, envChild);
+    const call = await mcp(envPort, "tools/call", {
+      name: "framework_detect",
+      arguments: { payload: "patient diagnosis" },
+    });
+    assert.equal(call.status, 401);
+    assert.equal(call.body.error.data.reason, "api_key_required");
   } finally {
     envChild.kill();
   }

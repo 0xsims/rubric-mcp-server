@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { createMcpServer, hasConfiguredApiKey, listEnabledTools, packageVersion, runWithApiKey, SERVER_NAME } from "./index.js";
+import { createMcpServer, listEnabledTools, packageVersion, runWithApiKey, SERVER_NAME } from "./index.js";
 
 const CORS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -83,7 +83,8 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<voi
       sendJson(res, 400, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
       return;
     }
-    if (bodyCallsTool(parsed) && !requestApiKey(req) && !hasConfiguredApiKey()) {
+    // Request key only. A hosted TENPRINT_API_KEY / RUBRIC_API_KEY must not authorize anonymous tools/call.
+    if (bodyCallsTool(parsed) && !requestApiKey(req)) {
       sendJson(res, 401, {
         jsonrpc: "2.0",
         id: jsonRpcId(parsed),

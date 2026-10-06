@@ -127,8 +127,8 @@ The npm bin stays on stdio. To serve a remote endpoint:
 
 `PORT` defaults to 3000.
 
-- `POST /mcp` — MCP Streamable HTTP. `initialize` and `tools/list` need no credentials, so a directory can scan the server. `tools/call` requires an API key and otherwise returns HTTP 401 with a JSON-RPC error (`code` -32000, `message` "Unauthorized").
-- Send the key as `Authorization: Bearer <key>` or `x-api-key: <key>`. A key already in the environment (`TENPRINT_API_KEY`, or `RUBRIC_API_KEY` if the new name is unset) also satisfies the check. A key on the request is the one sent upstream as `x-api-key`.
+- `POST /mcp` — MCP Streamable HTTP. `initialize` and `tools/list` need no credentials, so a directory can scan the server. `tools/call` requires a key on that request and otherwise returns HTTP 401 with a JSON-RPC error (`code` -32000, `message` "Unauthorized").
+- Send the key as `Authorization: Bearer <key>` or `x-api-key: <key>`. That request key is what is sent upstream as `x-api-key`. `TENPRINT_API_KEY` and `RUBRIC_API_KEY` apply to stdio only. They do not authorize HTTP `tools/call`, so a hosted process cannot spend its own key for an anonymous caller.
 - `GET /health` — `{ "status": "ok" }`
 - `GET /.well-known/mcp/server-card.json` — server card. Its `tools` array is the same list `tools/list` returns for this process.
 
@@ -139,7 +139,7 @@ The image runs the HTTP transport, not stdio. `RUBRIC_MCP_MODULES` in the image 
     docker build -t tenprint-mcp .
     docker run --rm -p 8080:8080 tenprint-mcp
 
-`POST http://127.0.0.1:8080/mcp` then serves `initialize` and `tools/list` with no key. Pass `-e TENPRINT_API_KEY=your-key` when `tools/call` should be allowed without a per-request credential. A caller can still send `Authorization: Bearer <key>` or `x-api-key` instead.
+`POST http://127.0.0.1:8080/mcp` then serves `initialize` and `tools/list` with no key. `tools/call` needs `Authorization: Bearer <key>` or `x-api-key` on the request. Setting `TENPRINT_API_KEY` on the container does not open `tools/call`.
 
 ## Links
 

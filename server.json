@@ -20,7 +20,7 @@
       "environmentVariables": [
         {
           "name": "TENPRINT_API_KEY",
-          "description": "API key for Hedera anchoring. Optional; omit for the free local tier. RUBRIC_API_KEY still works as a deprecated fallback.",
+          "description": "API key for the stdio transport. Optional; omit for the free local tier. RUBRIC_API_KEY is a deprecated stdio fallback. HTTP tools/call ignores this and requires Authorization: Bearer or x-api-key on the request.",
           "isRequired": false,
           "isSecret": true,
           "format": "string"
@@ -49,7 +49,7 @@
       "headers": [
         {
           "name": "Authorization",
-          "description": "Bearer API key. Required for tools/call. initialize and tools/list work without it.",
+          "description": "Bearer API key required on the request for tools/call. The server environment key is not a substitute. initialize and tools/list work without it.",
           "isRequired": false,
           "isSecret": true
         }

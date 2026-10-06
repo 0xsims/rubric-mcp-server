@@ -5,7 +5,7 @@
 ### Added
 - Streamable HTTP transport via `node dist/index.js --http` (stdio stays the default for the npm bin)
 - `POST /mcp`, `GET /health`, and `GET /.well-known/mcp/server-card.json`
-- HTTP `tools/call` requires `Authorization: Bearer <key>`, an `x-api-key` header, or `TENPRINT_API_KEY` / `RUBRIC_API_KEY` in the environment. `initialize` and `tools/list` do not
+- HTTP `tools/call` requires `Authorization: Bearer <key>` or an `x-api-key` header on the request. `TENPRINT_API_KEY` / `RUBRIC_API_KEY` authorize stdio only, not HTTP `tools/call`. `initialize` and `tools/list` do not require a key
 - Dockerfile that runs HTTP mode, `glama.json`, and official MCP registry `server.json` (`ai.tenprint/tenprint`, npm `@tenprint/mcp-server` 2.3.0, remote `https://mcp.tenprint.ai/mcp`)
 
 ### Changed

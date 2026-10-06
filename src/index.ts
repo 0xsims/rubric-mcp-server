@@ -2,31 +2,81 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "fs";
+import { X402_TOOLS, dispatchX402 } from "./x402-tools.js";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync } from "fs";
 import { homedir } from "os";
-import { dirname, join } from "path";
+import { dirname, join, relative, resolve } from "path";
 import { fileURLToPath } from "url";
 import { createHash, randomUUID } from "crypto";
+import { AsyncLocalStorage } from "async_hooks";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PKG = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8")) as { name: string; version: string };
 
-const API_KEY = process.env.RUBRIC_API_KEY ?? "";
+const TENPRINT_API_KEY = process.env.TENPRINT_API_KEY ?? "";
+const LEGACY_API_KEY = process.env.RUBRIC_API_KEY ?? "";
+if (!TENPRINT_API_KEY && LEGACY_API_KEY) {
+  console.error("[TenPrint MCP] RUBRIC_API_KEY is deprecated; set TENPRINT_API_KEY. The old name still works for now.");
+}
+const API_KEY = TENPRINT_API_KEY || LEGACY_API_KEY;
 const BASE_URL = (process.env.RUBRIC_BASE_URL ?? "https://rubric-protocol.com").replace(/\/$/, "");
 const DEFAULT_AGENT_ID = process.env.RUBRIC_AGENT_ID ?? "mcp-agent";
 const LOCAL_MODE = !API_KEY;
+const requestContext = new AsyncLocalStorage<string>();
+const transportContext = new AsyncLocalStorage<TransportMode>();
+
+export type TransportMode = "http" | "stdio";
+
+let processTransport: TransportMode | null = null;
+
+export const SERVER_NAME = "TenPrint";
+
+/** The HTTP listener sets this. Tool handlers also enter transportContext, so a lost argv flag cannot re-enable payments or the host key. */
+export function bindProcessTransport(mode: TransportMode): void {
+  processTransport = mode;
+}
+
+/**
+ * Stdio may use TENPRINT_API_KEY / RUBRIC_API_KEY. Every other path uses only the key
+ * stored for the current request, which is empty when the caller did not send one.
+ */
+function activeApiKey(): string {
+  const transport = transportContext.getStore() ?? processTransport;
+  const requestKey = requestContext.getStore();
+  if (transport === "stdio") return requestKey ?? API_KEY;
+  return requestKey ?? "";
+}
+
+function isLocalMode(): boolean {
+  return !activeApiKey();
+}
+
+export function runWithApiKey<T>(apiKey: string, fn: () => Promise<T>): Promise<T> {
+  return requestContext.run(apiKey, fn);
+}
+
+/** HTTP tool calls. The host environment key is not visible inside `fn`. */
+export function runWithHttpRequest<T>(apiKey: string, fn: () => Promise<T>): Promise<T> {
+  return transportContext.run("http", () => requestContext.run(apiKey, fn));
+}
+
+export function packageVersion(): string {
+  return PKG.version;
+}
 
 const LOCAL_STORE = join(homedir(), ".rubric", "local-bundles");
 mkdirSync(LOCAL_STORE, { recursive: true });
 
-if (LOCAL_MODE) {
-  console.error("[Rubric MCP] ⚠  LOCAL-ONLY MODE");
-  console.error("[Rubric MCP]   Attestations are PQ-signed locally but NOT HCS-anchored.");
-  console.error("[Rubric MCP]   For Hedera mainnet anchoring, set RUBRIC_API_KEY.");
-  console.error("[Rubric MCP]   Request a free key via the `register_agent` tool.");
-} else {
-  console.error(`[Rubric MCP] HCS-anchored mode — ${BASE_URL} / agent: ${DEFAULT_AGENT_ID}`);
+function logStdioMode(): void {
+  if (LOCAL_MODE) {
+    console.error("[TenPrint MCP] ⚠  LOCAL-ONLY MODE");
+    console.error("[TenPrint MCP]   Attestations are PQ-signed locally but NOT HCS-anchored.");
+    console.error("[TenPrint MCP]   For Hedera mainnet anchoring, set TENPRINT_API_KEY.");
+    console.error("[TenPrint MCP]   Request a free key via the `register_agent` tool.");
+    return;
+  }
+  console.error(`[TenPrint MCP] HCS-anchored mode — ${BASE_URL} / agent: ${DEFAULT_AGENT_ID}`);
 }
 
 function sha3(input: string): string {
@@ -34,10 +84,11 @@ function sha3(input: string): string {
 }
 
 async function rubricPost<T>(path: string, body: unknown): Promise<T> {
-  if (LOCAL_MODE) throw new Error("This tool requires RUBRIC_API_KEY. Use `register_agent` to request a free key.");
+  const apiKey = activeApiKey();
+  if (!apiKey) throw new Error("This tool requires TENPRINT_API_KEY. Use `register_agent` to request a free key.");
   const res = await fetch(`${BASE_URL}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": API_KEY },
+    headers: { "Content-Type": "application/json", "x-api-key": apiKey },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -48,8 +99,9 @@ async function rubricPost<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function rubricGet<T>(path: string): Promise<T> {
+  const apiKey = activeApiKey();
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: API_KEY ? { "x-api-key": API_KEY } : {},
+    headers: apiKey ? { "x-api-key": apiKey } : {},
   });
   if (!res.ok) throw new Error(`Rubric ${res.status} ${path}`);
   return res.json() as Promise<T>;
@@ -82,13 +134,13 @@ function estimateMonthly(decisionsPerDay: number) {
 }
 
 const TOOLS = [
-  { name: "attest", description: "Attest an AI decision. With RUBRIC_API_KEY: HCS-anchored on Hedera mainnet. Without: PQ-signed local Merkle leaf in ~/.rubric/local-bundles/.", inputSchema: { type: "object", properties: { payload: { type: "string" }, agent_id: { type: "string" }, metadata: { type: "object", additionalProperties: true } }, required: ["payload"] } },
+  { name: "attest", description: "Attest an AI decision. With TENPRINT_API_KEY: HCS-anchored on Hedera mainnet. Without: PQ-signed local Merkle leaf in ~/.rubric/local-bundles/.", inputSchema: { type: "object", properties: { payload: { type: "string" }, agent_id: { type: "string" }, metadata: { type: "object", additionalProperties: true } }, required: ["payload"] } },
   { name: "verify", description: "Verify an attestation. Checks local store first, then federation. Merkle inclusion + HCS anchoring.", inputSchema: { type: "object", properties: { attestation_id: { type: "string" } }, required: ["attestation_id"] } },
   { name: "get_proof", description: "Generate ZK Merkle inclusion proof (Noir/Barretenberg) for an attestation. Requires API key.", inputSchema: { type: "object", properties: { attestation_id: { type: "string" } }, required: ["attestation_id"] } },
-  { name: "register_agent", description: "Register an agent and receive a free Rubric developer API key via email.", inputSchema: { type: "object", properties: { email: { type: "string" }, agent_name: { type: "string" }, use_case: { type: "string" } }, required: ["email", "agent_name"] } },
+  { name: "register_agent", description: "Register an agent and receive a free TenPrint developer API key via email.", inputSchema: { type: "object", properties: { email: { type: "string" }, agent_name: { type: "string" }, use_case: { type: "string" } }, required: ["email", "agent_name"] } },
   { name: "status", description: "Federation health across US/SG/JP/CA/EU nodes + ZK node.", inputSchema: { type: "object", properties: {} } },
   { name: "framework_detect", description: "Auto-detect applicable regulatory frameworks (EU AI Act, SR 26-2, HIPAA, NIST AI RMF, etc.) from decision content. Works offline, no key required.", inputSchema: { type: "object", properties: { payload: { type: "string" }, metadata: { type: "object", additionalProperties: true } }, required: ["payload"] } },
-  { name: "cost_estimate", description: "Estimate monthly Rubric cost from expected decision volume. No key required.", inputSchema: { type: "object", properties: { decisions_per_day: { type: "number" } }, required: ["decisions_per_day"] } },
+  { name: "cost_estimate", description: "Estimate monthly TenPrint cost from expected decision volume. No key required.", inputSchema: { type: "object", properties: { decisions_per_day: { type: "number" } }, required: ["decisions_per_day"] } },
   { name: "bundle_query", description: "Query attestation bundles by leaf type, agent, or time range. Requires Standard+ tier.", inputSchema: { type: "object", properties: { leafType: { type: "string" }, agentId: { type: "string" }, limit: { type: "number" } } } },
 
   { name: "attest_batch", description: "Batch-attest up to 1,000 AI decisions in one call (tiered path, HCS-anchored at tier-2 flush). Requires API key.", inputSchema: { type: "object", properties: { items: { type: "array", items: { type: "object", properties: { data: { type: "string" }, sourceId: { type: "string" } }, required: ["data", "sourceId"] } } }, required: ["items"] } },
@@ -130,6 +182,7 @@ const TOOLS = [
   { name: "model_get", description: "Fetch a registered model's record and commitment.", inputSchema: { type: "object", properties: { model_id: { type: "string" } }, required: ["model_id"] } },
   { name: "usage_report", description: "Current-period usage and quota for your API key.", inputSchema: { type: "object", properties: {} } },
   { name: "auditor_token_create", description: "Mint a scoped read-only auditor-portal token for external examiners. Enterprise tier.", inputSchema: { type: "object", properties: { scope: { type: "string" }, expiresInDays: { type: "number" } } } },
+  ...X402_TOOLS,
 ];
 
 async function handleAttest(args: Record<string, unknown>) {
@@ -137,24 +190,43 @@ async function handleAttest(args: Record<string, unknown>) {
   const agentId = (args.agent_id as string) ?? DEFAULT_AGENT_ID;
   const metadata = (args.metadata as Record<string, unknown>) ?? { source: "mcp" };
 
-  if (LOCAL_MODE) {
+  if (isLocalMode()) {
     const id = randomUUID();
     const timestamp = new Date().toISOString();
     const leafHash = sha3(JSON.stringify({ payload, agentId, metadata, timestamp }));
     const leaf = { attestationId: id, leafHash, timestamp, agentId, metadata, mode: "local", anchored: false };
     writeFileSync(join(LOCAL_STORE, `${id}.json`), JSON.stringify(leaf, null, 2));
-    return { ...leaf, upgrade: "Set RUBRIC_API_KEY for HCS anchoring, or use `register_agent` for a free key." };
+    return { ...leaf, upgrade: "Set TENPRINT_API_KEY for HCS anchoring, or use `register_agent` for a free key." };
   }
 
   return rubricPost("/v1/tiered-attest", { agentId, sourceId: agentId, data: payload, metadata });
 }
 
-async function handleVerify(args: Record<string, unknown>) {
-  const id = args.attestation_id as string;
-  const localPath = join(LOCAL_STORE, `${id}.json`);
-  if (existsSync(localPath)) {
-    const leaf = JSON.parse(readFileSync(localPath, "utf8"));
-    if (LOCAL_MODE) return { ...leaf, source: "local" };
+const LOCAL_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+function readLocalAttestation(id: string): Record<string, unknown> | undefined {
+  if (!LOCAL_ID.test(id)) return undefined;
+  const root = resolve(LOCAL_STORE);
+  const file = resolve(root, `${id}.json`);
+  const rel = relative(root, file);
+  if (rel.startsWith("..") || rel.split(/[/\\]/).includes("..")) return undefined;
+  if (!existsSync(file)) return undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+async function handleVerify(args: Record<string, unknown>, transport: TransportMode) {
+  const id = typeof args.attestation_id === "string" ? args.attestation_id : "";
+  // HTTP never reads the host filesystem. stdio keeps the 2.2.2 local-bundle lookup,
+  // limited to ids that cannot escape LOCAL_STORE.
+  if (transport === "stdio" && isLocalMode()) {
+    const leaf = readLocalAttestation(id);
+    if (leaf) return { ...leaf, source: "local" };
   }
   return rubricGet(`/v1/verify/${encodeURIComponent(id)}`);
 }
@@ -192,9 +264,14 @@ async function handleCostEstimate(args: Record<string, unknown>) {
   return estimateMonthly(args.decisions_per_day as number);
 }
 
+function pick(source: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of keys) if (source[key] !== undefined) out[key] = source[key];
+  return out;
+}
+
 async function handleBundleQuery(args: Record<string, unknown>) {
-  const qs = new URLSearchParams(args as Record<string, string>).toString();
-  return rubricGet(`/v1/bundles${qs ? "?" + qs : ""}`);
+  return rubricGet(`/v1/bundles${qstr(args, ["leafType", "agentId", "limit"])}`);
 }
 
 function qstr(a: Record<string, unknown>, keys: string[]): string {
@@ -204,7 +281,12 @@ function qstr(a: Record<string, unknown>, keys: string[]): string {
   return q ? "?" + q : "";
 }
 
-async function handleAttestBatch(a: Record<string, unknown>) { return rubricPost("/v1/tiered-attest-batch", { items: a.items }); }
+async function handleAttestBatch(a: Record<string, unknown>) {
+  const items = Array.isArray(a.items)
+    ? a.items.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item)).map((item) => pick(item, ["data", "sourceId"]))
+    : [];
+  return rubricPost("/v1/tiered-attest-batch", { items });
+}
 async function handleAttestationStatus(a: Record<string, unknown>) { return rubricGet(`/v1/status/${encodeURIComponent(a.attestation_id as string)}`); }
 async function handleAttestationGet(a: Record<string, unknown>) { return rubricGet(`/v1/attestations/${encodeURIComponent(a.attestation_id as string)}`); }
 async function handlePipelineTrace(a: Record<string, unknown>) { return rubricGet(`/v1/pipeline/${encodeURIComponent(a.pipeline_id as string)}`); }
@@ -215,42 +297,38 @@ async function handleVerifyBatch(a: Record<string, unknown>) { return rubricPost
 async function handleZkVerify(a: Record<string, unknown>) { return rubricPost("/v1/zk-verify", { proof: a.proof }); }
 async function handleZkProofGet(a: Record<string, unknown>) { return rubricGet(`/v1/zk-proof/${encodeURIComponent(a.attestation_id as string)}`); }
 async function handleLedgerLookup(a: Record<string, unknown>) { return rubricGet(`/v1/ledger/${encodeURIComponent(String(a.sequence))}`); }
-async function handleAnnex4Generate(a: Record<string, unknown>) { return rubricPost("/v1/compliance/annex4/generate", a); }
+async function handleAnnex4Generate(a: Record<string, unknown>) { return rubricPost("/v1/compliance/annex4/generate", pick(a, ["systemId", "from", "to"])); }
 async function handleAnnex4Status(a: Record<string, unknown>) { return rubricGet(`/v1/compliance/annex4/status/${encodeURIComponent(a.job_id as string)}`); }
 async function handleC2paAttest(a: Record<string, unknown>) { return rubricPost("/v1/c2pa/attest", a.payload as Record<string, unknown>); }
 async function handleC2paAssertion(a: Record<string, unknown>) { return rubricGet(`/v1/c2pa/assertion/${encodeURIComponent(a.attestation_id as string)}`); }
-async function handleCredentialIssue(a: Record<string, unknown>) { return rubricPost("/v1/credentials/issue", a); }
+async function handleCredentialIssue(a: Record<string, unknown>) { return rubricPost("/v1/credentials/issue", pick(a, ["attestation_id", "subject"])); }
 async function handleCredentialGet(a: Record<string, unknown>) { return rubricGet(`/v1/credentials/${encodeURIComponent(a.credential_id as string)}`); }
 async function handleComplianceQuery(a: Record<string, unknown>) { return rubricGet(`/v1/compliance/query${qstr(a, ["systemId", "rubricEventType", "agentId", "jurisdiction", "contextId", "from", "to", "limit"])}`); }
-async function handleComplianceReport(a: Record<string, unknown>) { return rubricPost("/v1/export/report", a); }
-async function handleFilingGenerate(a: Record<string, unknown>) { return rubricPost("/v1/filings/generate", a); }
-async function handleGpaiRegister(a: Record<string, unknown>) { return rubricPost("/v1/compliance/gpai/register", a); }
+async function handleComplianceReport(a: Record<string, unknown>) { return rubricPost("/v1/export/report", pick(a, ["from", "to", "format"])); }
+async function handleFilingGenerate(a: Record<string, unknown>) { return rubricPost("/v1/filings/generate", pick(a, ["filingType", "systemId"])); }
+async function handleGpaiRegister(a: Record<string, unknown>) { return rubricPost("/v1/compliance/gpai/register", pick(a, ["gpaiModelId", "role"])); }
 async function handleGpaiDownstream(a: Record<string, unknown>) { return rubricGet(`/v1/gpai/downstream/${encodeURIComponent(a.gpai_model_id as string)}`); }
-async function handleNistRmfCertify(a: Record<string, unknown>) { return rubricPost("/v1/compliance/nist-rmf/certify", a); }
+async function handleNistRmfCertify(a: Record<string, unknown>) { return rubricPost("/v1/compliance/nist-rmf/certify", pick(a, ["contextId"])); }
 async function handleNistRmfStatus(a: Record<string, unknown>) { return rubricGet(`/v1/compliance/nist-rmf/status/${encodeURIComponent(a.context_id as string)}`); }
 async function handleJurisdictionMap() { return rubricGet("/v1/jurisdiction/map"); }
-async function handleJurisdictionAssess(a: Record<string, unknown>) { return rubricPost("/v1/jurisdiction/assess", a); }
+async function handleJurisdictionAssess(a: Record<string, unknown>) { return rubricPost("/v1/jurisdiction/assess", pick(a, ["jurisdiction", "systemId"])); }
 async function handleJurisdictionGap(a: Record<string, unknown>) { return rubricGet(`/v1/jurisdiction/gap-analysis${qstr(a, ["jurisdiction"])}`); }
-async function handleIncidentCreate(a: Record<string, unknown>) { return rubricPost("/v1/incidents", a); }
+async function handleIncidentCreate(a: Record<string, unknown>) { return rubricPost("/v1/incidents", pick(a, ["title", "description", "severity"])); }
 async function handleIncidentAttest(a: Record<string, unknown>) { return rubricPost(`/v1/incidents/${encodeURIComponent(a.incident_id as string)}/attest`, { note: a.note }); }
 async function handleIncidentResolve(a: Record<string, unknown>) { return rubricPost(`/v1/incidents/${encodeURIComponent(a.incident_id as string)}/resolve`, { resolution: a.resolution }); }
-async function handleHumanReview(a: Record<string, unknown>) { return rubricPost("/v1/human-review", a); }
-async function handleAdversarialStart(a: Record<string, unknown>) { return rubricPost("/v1/adversarial/sessions", a); }
+async function handleHumanReview(a: Record<string, unknown>) { return rubricPost("/v1/human-review", pick(a, ["attestationId", "decision", "reviewerId", "reason"])); }
+async function handleAdversarialStart(a: Record<string, unknown>) { return rubricPost("/v1/adversarial/sessions", pick(a, ["name", "scope"])); }
 async function handleAdversarialConclude(a: Record<string, unknown>) { return rubricPost(`/v1/adversarial/sessions/${encodeURIComponent(a.session_id as string)}/conclude`, { findings: a.findings }); }
-async function handleAgentAdd(a: Record<string, unknown>) { return rubricPost("/v1/agents/register", a); }
+async function handleAgentAdd(a: Record<string, unknown>) { return rubricPost("/v1/agents/register", pick(a, ["agentId", "name", "description"])); }
 async function handleAgentGet(a: Record<string, unknown>) { return rubricGet(`/v1/agents/${encodeURIComponent(a.agent_id as string)}`); }
-async function handleModelRegister(a: Record<string, unknown>) { return rubricPost("/v1/models/register", a); }
+async function handleModelRegister(a: Record<string, unknown>) { return rubricPost("/v1/models/register", pick(a, ["modelId", "modelHash", "version"])); }
 async function handleModelGet(a: Record<string, unknown>) { return rubricGet(`/v1/models/${encodeURIComponent(a.model_id as string)}`); }
 async function handleUsageReport() { return rubricGet("/v1/usage"); }
-async function handleAuditorTokenCreate(a: Record<string, unknown>) { return rubricPost("/v1/auditor/tokens", a); }
-
-const server = new Server(
-  { name: PKG.name, version: PKG.version },
-  { capabilities: { tools: {} } }
-);
+async function handleAuditorTokenCreate(a: Record<string, unknown>) { return rubricPost("/v1/auditor/tokens", pick(a, ["scope", "expiresInDays"])); }
 
 const MCP_MODULES: Record<string, string[]> = {
   core: ["attest", "verify", "get_proof", "register_agent", "status", "framework_detect", "cost_estimate", "bundle_query"],
+  x402: ["screen_entity", "wallet_record", "agent_record", "attested_inference", "hedera_fact", "verify_audit"],
   attestation: ["attest_batch", "attestation_status", "attestation_get", "pipeline_trace", "bundle_get"],
   verification: ["verify_chain", "verify_tree", "verify_batch", "zk_verify", "zk_proof_get", "ledger_lookup"],
   compliance: ["annex4_generate", "annex4_status", "c2pa_attest", "c2pa_assertion", "credential_issue", "credential_get", "compliance_query", "compliance_report", "filing_generate"],
@@ -259,23 +337,56 @@ const MCP_MODULES: Record<string, string[]> = {
   registry: ["agent_add", "agent_get", "model_register", "model_get"],
   ops: ["usage_report", "auditor_token_create"],
 };
-const _mods = (process.env.RUBRIC_MCP_MODULES ?? "core").split(",").map((s: string) => s.trim()).filter(Boolean);
+const _mods = (process.env.RUBRIC_MCP_MODULES ?? "core,x402").split(",").map((s: string) => s.trim()).filter(Boolean);
 const ENABLED_TOOLS = new Set(
   _mods.includes("all") ? Object.values(MCP_MODULES).flat()
                         : _mods.flatMap((m: string) => MCP_MODULES[m] ?? [])
 );
 if (ENABLED_TOOLS.size === 0) MCP_MODULES.core.forEach((t: string) => ENABLED_TOOLS.add(t));
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS.filter((t: { name: string }) => ENABLED_TOOLS.has(t.name)) }));
+function isEnabled(name: string, transport: TransportMode): boolean {
+  if (transport === "http" && MCP_MODULES.x402.includes(name)) return false;
+  return ENABLED_TOOLS.has(name);
+}
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+export function listEnabledTools(transport: TransportMode = processTransport === "stdio" ? "stdio" : "http") {
+  return TOOLS.filter((t) => isEnabled(t.name, transport));
+}
+
+/**
+ * Payments and the host API key are off unless the caller opts in with `{ transport: "stdio" }`.
+ * The stdio CLI is the only entry that does that. An embedded `createMcpServer()` stays on the deny path.
+ */
+export function createMcpServer(options?: { transport?: TransportMode }): Server {
+  const transport: TransportMode = options?.transport === "stdio" ? "stdio" : "http";
+  const server = new Server(
+    { name: SERVER_NAME, version: PKG.version },
+    { capabilities: { tools: {} } }
+  );
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listEnabledTools(transport) }));
+  server.setRequestHandler(CallToolRequestSchema, (request) => transportContext.run(transport, () => handleCallTool(request, transport)));
+  return server;
+}
+
+async function handleCallTool(request: { params: { name: string; arguments?: Record<string, unknown> } }, transport: TransportMode) {
   const { name, arguments: args } = request.params;
   const a = (args ?? {}) as Record<string, unknown>;
   try {
     let result: unknown;
+    if (transport === "http" && MCP_MODULES.x402.includes(name)) {
+      return { content: [{ type: "text", text: "Error: x402 paid tools are disabled in HTTP mode." }], isError: true };
+    }
+    if (!ENABLED_TOOLS.has(name)) {
+      return { content: [{ type: "text", text: `Error: tool ${name} is not enabled.` }], isError: true };
+    }
+    // allowPayments is the swap point for the paid path. Only an explicit stdio server sets it.
+    const x = await dispatchX402(name, a, { allowPayments: transport === "stdio" });
+    if (x !== null) {
+      return { content: [{ type: "text", text: JSON.stringify(x, null, 2) }] };
+    }
     switch (name) {
       case "attest":            result = await handleAttest(a); break;
-      case "verify":            result = await handleVerify(a); break;
+      case "verify":            result = await handleVerify(a, transport); break;
       case "get_proof":         result = await handleGetProof(a); break;
       case "register_agent":    result = await handleRegisterAgent(a); break;
       case "status":            result = await handleStatus(); break;
@@ -329,11 +440,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const msg = err instanceof Error ? err.message : String(err);
     return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
   }
-});
-
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
 }
 
-main().catch((err) => { console.error(err); process.exit(1); });
+function startedAsCli(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(entry);
+  } catch {
+    return false;
+  }
+}
+
+async function main() {
+  if (process.argv.includes("--http")) {
+    const { startHttpServer } = await import("./http.js");
+    await startHttpServer();
+    return;
+  }
+  bindProcessTransport("stdio");
+  logStdioMode();
+  const transport = new StdioServerTransport();
+  await createMcpServer({ transport: "stdio" }).connect(transport);
+}
+
+if (startedAsCli()) {
+  main().catch((err) => { console.error(err); process.exit(1); });
+}

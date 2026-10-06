@@ -11,8 +11,19 @@
 
 ### Changed
 - Package renamed to `@tenprint/mcp-server` (bin `tenprint-mcp`; `rubric-mcp` kept as an alias)
-- Server name shown to clients is TenPrint
+- Server name shown to clients is TenPrint. Clients that stored the previous name `@rubric-protocol/mcp-server` will see a new server.
 - API key environment variable is `TENPRINT_API_KEY`. `RUBRIC_API_KEY` still works and logs a deprecation warning
+- Requires Node.js 22 or newer
+- x402 payments are limited to USDC on Base paid to the published address, at or below each tool's maximum, with the daily budget reserved before signing
+
+### Security
+- npm bin startup compares real paths, so a global install, `npx`, or a symlinked `.bin` entry stays running
+- HTTP mode is a property of the HTTP server, not of `process.argv`
+- HTTP requests are checked for `Host` and `Origin`, bound to `127.0.0.1` unless `HOST` is set, limited in body size and rate, and `GET`/`DELETE /mcp` return 405
+- `verify` on stdio only reads local bundle ids inside `~/.rubric/local-bundles`. HTTP does not read that directory
+- Disabled `RUBRIC_MCP_MODULES` entries are rejected on `tools/call`
+
+The changelog published with npm `@rubric-protocol/mcp-server` stopped at 2.0.1. This file does not add notes for 2.1 or 2.2.
 
 ### Unchanged
 - x402 paid tools and the rest of the 2.2.2 tool surface

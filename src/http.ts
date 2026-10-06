@@ -1,18 +1,27 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { createMcpServer, listEnabledTools, packageVersion, runWithApiKey, SERVER_NAME } from "./index.js";
+import { bindProcessTransport, createMcpServer, listEnabledTools, packageVersion, runWithHttpRequest, SERVER_NAME } from "./index.js";
 
-const CORS: Record<string, string> = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Accept, Authorization, x-api-key, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID",
-};
+const MAX_BODY_BYTES = 1_048_576;
+const RATE_WINDOW_MS = 60_000;
+
+class HttpError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
+}
+
+const hits = new Map<string, number[]>();
 
 export function buildServerCard() {
   return {
     serverInfo: { name: SERVER_NAME, version: packageVersion() },
-    authentication: { required: false, schemes: ["bearer"] },
-    tools: listEnabledTools(),
+    authentication: {
+      required: true,
+      schemes: ["bearer"],
+      description: "tools/call requires Authorization: Bearer or an x-api-key header. initialize and tools/list do not require authentication.",
+    },
+    tools: listEnabledTools("http"),
     resources: [] as unknown[],
     prompts: [] as unknown[],
   };
@@ -25,10 +34,54 @@ function listenPort(): number {
   return Number(raw);
 }
 
+function bindHost(): string {
+  const host = (process.env.HOST ?? "").trim();
+  return host || "127.0.0.1";
+}
+
 function headerValue(value: string | string[] | undefined): string {
   if (typeof value === "string") return value.trim();
   if (Array.isArray(value)) return value[0]?.trim() ?? "";
   return "";
+}
+
+function csvEnv(name: string): string[] {
+  return (process.env[name] ?? "").split(",").map((part) => part.trim()).filter(Boolean);
+}
+
+function stripPort(host: string): string {
+  if (host.startsWith("[")) {
+    const end = host.indexOf("]");
+    return end === -1 ? host : host.slice(0, end + 1);
+  }
+  return host.replace(/:\d+$/, "");
+}
+
+function allowedHostNames(): string[] {
+  const configured = csvEnv("TENPRINT_ALLOWED_HOSTS");
+  return configured.length > 0 ? configured : ["127.0.0.1", "localhost", "::1"];
+}
+
+function hostAllowed(host: string): boolean {
+  if (!host) return false;
+  const names = allowedHostNames();
+  if (names.includes(host)) return true;
+  return names.includes(stripPort(host));
+}
+
+function originAllowed(origin: string): boolean {
+  if (!origin) return true;
+  return csvEnv("TENPRINT_ALLOWED_ORIGINS").includes(origin);
+}
+
+function sdkAllowedHosts(port: number): string[] {
+  const hosts = new Set<string>();
+  for (const name of allowedHostNames()) {
+    hosts.add(name);
+    if (name.startsWith("[")) hosts.add(`${name}:${port}`);
+    else if (!/:\d+$/.test(name)) hosts.add(`${name}:${port}`);
+  }
+  return [...hosts];
 }
 
 /** Bearer token, then the x-api-key header the upstream API already uses. */
@@ -56,20 +109,91 @@ function jsonRpcId(body: unknown): string | number | null {
 
 function sendJson(res: ServerResponse, status: number, body: unknown, extra: Record<string, string> = {}): void {
   const payload = JSON.stringify(body);
-  res.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload), ...CORS, ...extra });
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Content-Length": Buffer.byteLength(payload),
+    ...extra,
+  });
   res.end(payload);
+}
+
+function rateLimitPerMinute(): number {
+  const raw = Number(process.env.TENPRINT_RATE_LIMIT_PER_MINUTE ?? "120");
+  if (!Number.isFinite(raw) || raw < 1) return 120;
+  return Math.floor(raw);
+}
+
+function rateLimited(bucket: string): boolean {
+  const now = Date.now();
+  const recent = (hits.get(bucket) ?? []).filter((at) => now - at < RATE_WINDOW_MS);
+  if (recent.length >= rateLimitPerMinute()) {
+    hits.set(bucket, recent);
+    return true;
+  }
+  recent.push(now);
+  hits.set(bucket, recent);
+  return false;
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer | string) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
+    let size = 0;
+    let settled = false;
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+    req.on("data", (chunk: Buffer | string) => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buf.length;
+      if (size > MAX_BODY_BYTES) {
+        req.pause();
+        fail(new HttpError(413, "payload too large"));
+        return;
+      }
+      chunks.push(buf);
+    });
+    req.on("end", () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+    req.on("error", (err) => fail(err));
   });
 }
 
-async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+function headersAllowed(req: IncomingMessage, res: ServerResponse): boolean {
+  if (!hostAllowed(headerValue(req.headers.host))) {
+    sendJson(res, 403, { error: "forbidden host" });
+    return false;
+  }
+  if (!originAllowed(headerValue(req.headers.origin))) {
+    sendJson(res, 403, { error: "forbidden origin" });
+    return false;
+  }
+  return true;
+}
+
+async function handleMcp(req: IncomingMessage, res: ServerResponse, boundPort: number): Promise<void> {
+  const ip = req.socket.remoteAddress ?? "unknown";
+  if (rateLimited(`ip:${ip}`)) {
+    sendJson(res, 429, { error: "rate limit exceeded" });
+    return;
+  }
+  const key = requestApiKey(req);
+  if (key && rateLimited(`key:${key}`)) {
+    sendJson(res, 429, { error: "rate limit exceeded" });
+    return;
+  }
+  const declaredLength = Number(req.headers["content-length"] ?? "0");
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) {
+    sendJson(res, 413, { error: "payload too large" });
+    req.destroy();
+    return;
+  }
+
   let parsed: unknown;
   if (req.method === "POST") {
     const raw = await readBody(req);
@@ -84,7 +208,7 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<voi
       return;
     }
     // Request key only. A hosted TENPRINT_API_KEY / RUBRIC_API_KEY must not authorize anonymous tools/call.
-    if (bodyCallsTool(parsed) && !requestApiKey(req)) {
+    if (bodyCallsTool(parsed) && !key) {
       sendJson(res, 401, {
         jsonrpc: "2.0",
         id: jsonRpcId(parsed),
@@ -98,12 +222,15 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<voi
     }
   }
 
-  const mcp = createMcpServer();
+  const mcp = createMcpServer({ transport: "http" });
+  const allowedOrigins = csvEnv("TENPRINT_ALLOWED_ORIGINS");
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
+    enableDnsRebindingProtection: true,
+    allowedHosts: sdkAllowedHosts(boundPort),
+    ...(allowedOrigins.length > 0 ? { allowedOrigins } : {}),
   });
-  const key = requestApiKey(req);
   const run = async () => {
     await mcp.connect(transport);
     try {
@@ -113,18 +240,31 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<voi
       await mcp.close().catch(() => undefined);
     }
   };
-  if (key) await runWithApiKey(key, run);
-  else await run();
+  await runWithHttpRequest(key, run);
 }
 
 export async function startHttpServer(): Promise<void> {
+  // Transport is part of this function, not process.argv. Importing and calling
+  // startHttpServer disables x402 even when the process was not started with --http.
+  bindProcessTransport("http");
+  const walletVars = ["RUBRIC_WALLET_KEY", "TENPRINT_WALLET_KEY"].filter((name) => (process.env[name] ?? "").trim() !== "");
+  if (walletVars.length > 0) {
+    console.error(`[TenPrint MCP] HTTP mode ignores ${walletVars.join(", ")}. x402 paid tools are disabled and this process will not sign or pay with a server wallet.`);
+  }
+  if ((process.env.TENPRINT_API_KEY ?? "").trim() || (process.env.RUBRIC_API_KEY ?? "").trim()) {
+    console.error("[TenPrint MCP] An API key is set in the environment. HTTP tools/call does not use it; pass Authorization: Bearer or x-api-key on the request.");
+  }
+
   const port = listenPort();
+  const host = bindHost();
+  let boundPort = port;
   const httpServer = createServer((req, res) => {
     void (async () => {
       try {
+        if (!headersAllowed(req, res)) return;
         const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
         if (req.method === "OPTIONS") {
-          res.writeHead(204, CORS);
+          res.writeHead(204, { Allow: "GET, POST" });
           res.end();
           return;
         }
@@ -136,23 +276,37 @@ export async function startHttpServer(): Promise<void> {
           sendJson(res, 200, buildServerCard());
           return;
         }
-        if (pathname === "/mcp" && (req.method === "POST" || req.method === "GET" || req.method === "DELETE")) {
-          await handleMcp(req, res);
+        if (pathname === "/mcp" && (req.method === "GET" || req.method === "DELETE")) {
+          sendJson(res, 405, { error: "method not allowed" }, { Allow: "POST" });
+          return;
+        }
+        if (pathname === "/mcp" && req.method === "POST") {
+          await handleMcp(req, res, boundPort);
           return;
         }
         sendJson(res, 404, { error: "not found" });
       } catch (err) {
+        if (err instanceof HttpError && !res.headersSent) {
+          sendJson(res, err.status, { error: err.message });
+          req.destroy();
+          return;
+        }
         console.error(err);
         if (!res.headersSent) sendJson(res, 500, { jsonrpc: "2.0", id: null, error: { code: -32603, message: "Internal error" } });
       }
     })();
   });
+  httpServer.requestTimeout = 30_000;
+  httpServer.headersTimeout = 20_000;
+  httpServer.timeout = 30_000;
 
   await new Promise<void>((resolve, reject) => {
     httpServer.once("error", reject);
-    httpServer.listen(port, "0.0.0.0", () => resolve());
+    httpServer.listen(port, host, () => {
+      const address = httpServer.address();
+      if (typeof address === "object" && address) boundPort = address.port;
+      resolve();
+    });
   });
-  const address = httpServer.address();
-  const bound = typeof address === "object" && address ? address.port : port;
-  console.error(`[TenPrint MCP] Streamable HTTP listening on :${bound} (POST /mcp)`);
+  console.error(`[TenPrint MCP] Streamable HTTP listening on ${host}:${boundPort} (POST /mcp)`);
 }

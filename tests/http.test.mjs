@@ -129,6 +129,9 @@ test("server card tools match tools/list", async () => {
   assert.match(res.headers.get("content-type") ?? "", /application\/json/);
   const card = await res.json();
   assert.deepEqual(card.serverInfo, { name: "TenPrint", version: "2.3.0" });
+  assert.equal(card.authentication.required, true);
+  assert.match(card.authentication.description, /tools\/call/);
+  assert.equal(res.headers.get("access-control-allow-origin"), null);
   assert.deepEqual(card.tools, listed.body.result.tools);
   assert.deepEqual(card.resources, []);
   assert.deepEqual(card.prompts, []);
@@ -152,6 +155,7 @@ test("HTTP tools/call with no request key is refused even when TENPRINT_API_KEY 
   const envChild = startServer(envPort, { TENPRINT_API_KEY: "env-key" });
   try {
     await waitForHealth(envPort, envChild);
+    assert.doesNotMatch(envChild.stderrText(), /HCS-anchored/);
     const call = await mcp(envPort, "tools/call", {
       name: "cost_estimate",
       arguments: { decisions_per_day: 10 },
@@ -214,6 +218,138 @@ test("HTTP tools/list omits x402 tools when RUBRIC_WALLET_KEY is set", async () 
     assert.equal(call.body.result.isError, true);
     assert.match(call.body.result.content[0].text, /disabled in HTTP mode/);
     assert.equal(JSON.stringify(call.body).includes("spentTodayUsd"), false);
+  } finally {
+    envChild.kill();
+  }
+});
+
+test("GET /mcp returns 405 in stateless mode", async () => {
+  const res = await fetch(`http://127.0.0.1:${port}/mcp`);
+  assert.equal(res.status, 405);
+  assert.match(res.headers.get("allow") ?? "", /POST/);
+  const deleted = await fetch(`http://127.0.0.1:${port}/mcp`, { method: "DELETE" });
+  assert.equal(deleted.status, 405);
+});
+
+test("a present Origin that is not allowlisted is rejected and CORS is not wildcarded", async () => {
+  const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      origin: "https://evil.example",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+  });
+  assert.equal(res.status, 403);
+  assert.equal(res.headers.get("access-control-allow-origin"), null);
+});
+
+test("an allowlisted Origin can call tools/list", async () => {
+  const envPort = await freePort();
+  const envChild = startServer(envPort, { TENPRINT_ALLOWED_ORIGINS: "https://app.tenprint.ai" });
+  try {
+    await waitForHealth(envPort, envChild);
+    const ok = await fetch(`http://127.0.0.1:${envPort}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        origin: "https://app.tenprint.ai",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+    assert.equal(ok.status, 200, await ok.clone().text());
+    const blocked = await fetch(`http://127.0.0.1:${envPort}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        origin: "https://other.example",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+    assert.equal(blocked.status, 403);
+  } finally {
+    envChild.kill();
+  }
+});
+
+test("tools/call rejects a module that RUBRIC_MCP_MODULES did not enable", async () => {
+  const call = await mcp(port, "tools/call", {
+    name: "attest_batch",
+    arguments: { items: [{ data: "x", sourceId: "s", extra: "nope" }] },
+  }, { authorization: "Bearer test-key" });
+  assert.equal(call.status, 200, JSON.stringify(call.body));
+  assert.equal(call.body.result.isError, true);
+  assert.match(call.body.result.content[0].text, /not enabled/);
+});
+
+test("HTTP bodies over 1MB are rejected", async () => {
+  const envPort = await freePort();
+  const envChild = startServer(envPort);
+  try {
+    await waitForHealth(envPort, envChild);
+    const res = await fetch(`http://127.0.0.1:${envPort}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: `{"pad":"${"a".repeat(1_100_000)}"}`,
+    });
+    assert.equal(res.status, 413);
+  } finally {
+    envChild.kill();
+  }
+});
+
+test("HTTP rate limit returns 429", async () => {
+  const envPort = await freePort();
+  const envChild = startServer(envPort, { TENPRINT_RATE_LIMIT_PER_MINUTE: "2" });
+  try {
+    await waitForHealth(envPort, envChild);
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    const headers = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+    const first = await fetch(`http://127.0.0.1:${envPort}/mcp`, { method: "POST", headers, body });
+    const second = await fetch(`http://127.0.0.1:${envPort}/mcp`, { method: "POST", headers, body });
+    const third = await fetch(`http://127.0.0.1:${envPort}/mcp`, { method: "POST", headers, body });
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.equal(third.status, 429);
+  } finally {
+    envChild.kill();
+  }
+});
+
+test("importing startHttpServer without --http does not serve x402 tools", async () => {
+  const envPort = await freePort();
+  const embed = join(dirname(fileURLToPath(import.meta.url)), "embed-http.mjs");
+  const envChild = spawn(process.execPath, [embed], {
+    env: {
+      ...process.env,
+      PORT: String(envPort),
+      HOST: "127.0.0.1",
+      TENPRINT_API_KEY: "",
+      RUBRIC_API_KEY: "",
+      RUBRIC_WALLET_KEY: "test-wallet-key-not-used",
+      RUBRIC_MCP_MODULES: "all",
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  envChild.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  envChild.stderrText = () => stderr;
+  try {
+    await waitForHealth(envPort, envChild);
+    assert.doesNotMatch(stderr, /HCS-anchored/);
+    assert.match(stderr, /x402 paid tools are disabled/);
+    const listed = await mcp(envPort, "tools/list", {});
+    const names = listed.body.result.tools.map((tool) => tool.name);
+    for (const name of X402_TOOLS) assert.equal(names.includes(name), false, name);
+    const call = await mcp(envPort, "tools/call", {
+      name: "screen_entity",
+      arguments: { name: "example" },
+    }, { authorization: "Bearer request-key" });
+    assert.equal(call.body.result.isError, true);
+    assert.match(call.body.result.content[0].text, /disabled in HTTP mode/);
   } finally {
     envChild.kill();
   }

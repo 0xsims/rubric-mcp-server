@@ -1,100 +1,281 @@
-// x402 paid evidence tools - user-funded wallet, spend-governed.
-// Every paid response carries an attestation ID. Money safety:
-// (1) no wallet key -> helpful guidance, never an error stack
-// (2) daily spend ceiling, default $1.00, RUBRIC_X402_DAILY_LIMIT overrides
-// (3) pre-flight price check: refuse if the 402 quote exceeds the tool max
+// x402 paid evidence tools. The wallet key is used only when the caller passes
+// allowPayments (stdio). HTTP must pass allowPayments: false and never reaches signing.
+import type { PaymentPolicy } from "@x402/core/client";
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 
-const BASE = (process.env.RUBRIC_BASE_URL ?? "https://rubric-protocol.com").replace(/[/]$/, "");
-const HTTP_MODE = process.argv.includes("--http");
-const WALLET_KEY = process.env.RUBRIC_WALLET_KEY ?? "";
-const DAILY_LIMIT_USD = Number(process.env.RUBRIC_X402_DAILY_LIMIT ?? "1.00");
-const SPEND_FILE = join(homedir(), ".rubric", "x402-spend.json");
+const BASE_NETWORK = "eip155:8453";
+const BASE_NETWORK_V1 = "base";
+const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const PAYTO = "0xaB6731A0BcDf511c2842C768a03448075aB654ca";
 
-// tool max prices in USD - refuse any 402 quoting more
-const MAX_PRICE: Record<string, number> = {
-  screen_entity: 0.01, wallet_record: 0.005, agent_record: 0.005,
-  attested_inference: 0.01, hedera_fact: 0.001, verify_audit: 0.002,
+// Tool maximums in USDC atomic units (6 decimals).
+const MAX_MICRO: Record<string, number> = {
+  screen_entity: 10_000,
+  wallet_record: 5_000,
+  agent_record: 5_000,
+  attested_inference: 10_000,
+  hedera_fact: 1_000,
+  verify_audit: 2_000,
 };
 
 interface SpendState {
   date: string;
-  spentUsd: number;
+  spentMicro: number;
 }
 
-function spendState(): SpendState {
-  const today = new Date().toISOString().slice(0, 10);
+interface PaymentRequirement {
+  scheme?: string;
+  network?: string;
+  asset?: string;
+  payTo?: string;
+  amount?: string | number;
+  maxAmountRequired?: string | number;
+}
+
+let budgetTail: Promise<unknown> = Promise.resolve();
+
+function withBudgetLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = budgetTail.then(fn, fn);
+  budgetTail = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+function spendFile(): string {
+  const override = process.env.RUBRIC_X402_SPEND_FILE;
+  if (override && override.trim()) return override;
+  return join(homedir(), ".rubric", "x402-spend.json");
+}
+
+function todayUtc(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function dailyLimitMicro(): number {
+  const raw = process.env.RUBRIC_X402_DAILY_LIMIT ?? "1";
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) return 1_000_000;
+  return Math.round(value * 1e6);
+}
+
+function microToUsd(micro: number): number {
+  return Math.round(micro) / 1e6;
+}
+
+function microToMoney(micro: number): `$${string}` {
+  const whole = Math.trunc(micro / 1e6);
+  const frac = String(Math.abs(micro % 1e6)).padStart(6, "0").replace(/0+$/, "");
+  return (frac ? `$${whole}.${frac}` : `$${whole}`) as `$${string}`;
+}
+
+function readSpend(): SpendState {
+  const today = todayUtc();
   try {
-    const s = JSON.parse(readFileSync(SPEND_FILE, "utf8")) as SpendState;
-    if (s.date === today) return s;
+    const parsed = JSON.parse(readFileSync(spendFile(), "utf8")) as Partial<SpendState>;
+    if (parsed.date === today && typeof parsed.spentMicro === "number" && Number.isFinite(parsed.spentMicro)) {
+      return { date: today, spentMicro: parsed.spentMicro };
+    }
   } catch { /* fresh day or missing file */ }
-  return { date: today, spentUsd: 0 };
+  return { date: today, spentMicro: 0 };
 }
 
-function recordSpend(usd: number): number {
-  const s = spendState();
-  s.spentUsd = Math.round((s.spentUsd + usd) * 1e6) / 1e6;
-  mkdirSync(join(homedir(), ".rubric"), { recursive: true });
-  writeFileSync(SPEND_FILE, JSON.stringify(s));
-  return s.spentUsd;
+function writeSpend(state: SpendState): void {
+  const file = spendFile();
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(state));
 }
 
-const NO_WALLET_MSG = { paymentConfigured: false, howTo: "These tools pay per call in USDC on Base (fractions of a cent). Setup: (1) create a wallet, fund with a few USD of USDC on Base; (2) export RUBRIC_WALLET_KEY=<private key> in the MCP server env; (3) optional RUBRIC_X402_DAILY_LIMIT (default 1.00 USD/day). Keys never leave this process." };
-
-type PayFetch = (url: string, init: { method: string; headers: { "content-type": string }; body: string | undefined }) => Promise<Response>;
-let payFetchP: Promise<PayFetch> | null = null;
-
-function getPayFetch(): Promise<PayFetch> {
-  if (HTTP_MODE) return Promise.reject(new Error("x402 payments are disabled in HTTP mode"));
-  if (!payFetchP) payFetchP = (async () => {
-    const { privateKeyToAccount } = await import("viem/accounts");
-    const { x402Client, wrapFetchWithPayment } = await import("@x402/fetch");
-    const { registerExactEvmScheme } = await import("@x402/evm/exact/client");
-    const account = privateKeyToAccount(WALLET_KEY as `0x${string}`);
-    const client = new x402Client();
-    registerExactEvmScheme(client, { signer: account });
-    return wrapFetchWithPayment(fetch, client) as PayFetch;
-  })();
-  return payFetchP;
+async function reserve(micro: number): Promise<{ ok: boolean; spentMicro: number; limitMicro: number; date: string }> {
+  return withBudgetLock(async () => {
+    const limitMicro = dailyLimitMicro();
+    const state = readSpend();
+    if (state.spentMicro + micro > limitMicro) {
+      return { ok: false, spentMicro: state.spentMicro, limitMicro, date: state.date };
+    }
+    state.spentMicro += micro;
+    writeSpend(state);
+    return { ok: true, spentMicro: state.spentMicro, limitMicro, date: state.date };
+  });
 }
 
-async function quotedPriceUsd(url: string, method: string, body: string | undefined): Promise<number | null> {
-  const r = await fetch(url, { method, headers: { "content-type": "application/json" }, body });
-  if (r.status !== 402) return null;
-  const j = await r.json().catch(() => null) as { accepts?: Array<{ amount?: string | number; maxAmountRequired?: string | number }> } | null;
-  const amt = j && j.accepts && j.accepts[0] && (j.accepts[0].amount ?? j.accepts[0].maxAmountRequired);
-  return amt ? Number(amt) / 1e6 : null;
+async function release(micro: number, date: string): Promise<number> {
+  return withBudgetLock(async () => {
+    const state = readSpend();
+    if (state.date === date) state.spentMicro = Math.max(0, state.spentMicro - micro);
+    writeSpend(state);
+    return state.spentMicro;
+  });
+}
+
+function confirmRequired(): boolean {
+  const raw = (process.env.RUBRIC_X402_CONFIRM ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
+function walletKey(): string {
+  return process.env.RUBRIC_WALLET_KEY ?? "";
+}
+
+const NO_WALLET_MSG = {
+  paymentConfigured: false,
+  howTo: "These tools pay per call in USDC on Base. Use a dedicated low-balance wallet, never a main wallet. Set RUBRIC_WALLET_KEY to that key. Optional RUBRIC_X402_DAILY_LIMIT (default 1.00 USD/day) and RUBRIC_X402_CONFIRM=1 to require a second confirming call before paying.",
+};
+
+function requirementAmount(version: number, requirement: PaymentRequirement): bigint | null {
+  const raw = version === 1 ? requirement.maxAmountRequired : requirement.amount;
+  if (raw === undefined || raw === null) return null;
+  try {
+    return BigInt(raw);
+  } catch {
+    return null;
+  }
+}
+
+function pricePolicy(cap: bigint): PaymentPolicy {
+  return (version, requirements) => requirements.filter((requirement) => {
+    const candidate = requirement as PaymentRequirement;
+    if (candidate.scheme !== "exact") return false;
+    const network = candidate.network ?? "";
+    if (network !== BASE_NETWORK && network !== BASE_NETWORK_V1) return false;
+    if ((candidate.asset ?? "").toLowerCase() !== USDC_BASE.toLowerCase()) return false;
+    if ((candidate.payTo ?? "").toLowerCase() !== PAYTO.toLowerCase()) return false;
+    const amount = requirementAmount(version, candidate);
+    return amount !== null && amount <= cap;
+  });
+}
+
+async function createPaidClient(tool: string, key: string) {
+  const { privateKeyToAccount } = await import("viem/accounts");
+  const { x402Client } = await import("@x402/fetch");
+  const { registerExactEvmScheme } = await import("@x402/evm/exact/client");
+  const account = privateKeyToAccount(key as `0x${string}`);
+  const cap = BigInt(MAX_MICRO[tool] ?? 0);
+  const client = new x402Client();
+  registerExactEvmScheme(client, {
+    signer: account,
+    networks: [BASE_NETWORK],
+      policies: [pricePolicy(cap)],
+  });
+  client.setSpendControls({ maxAmountPerPayment: microToMoney(Number(cap)) });
+  return client;
+}
+
+const clientCache = new Map<string, ReturnType<typeof createPaidClient>>();
+
+function getClient(tool: string): ReturnType<typeof createPaidClient> {
+  const key = walletKey();
+  const cacheKey = `${tool}\0${key}`;
+  const cached = clientCache.get(cacheKey);
+  if (cached) return cached;
+  const pending = createPaidClient(tool, key);
+  clientCache.set(cacheKey, pending);
+  return pending;
+}
+
+function requestSigned(input: RequestInfo | URL, init?: RequestInit): boolean {
+  const headers = new Headers(input instanceof Request ? input.headers : undefined);
+  if (init?.headers) new Headers(init.headers).forEach((value, name) => headers.set(name, value));
+  return headers.has("payment-signature") || headers.has("x-payment");
 }
 
 async function paidCall(tool: string, path: string, method: string, body?: unknown): Promise<unknown> {
-  if (HTTP_MODE) return { error: "X402_DISABLED_IN_HTTP_MODE" };
-  if (!WALLET_KEY) return NO_WALLET_MSG;
-  const st = spendState();
-  const max = MAX_PRICE[tool] ?? 0.01;
-  if (st.spentUsd + max > DAILY_LIMIT_USD) return { error: "DAILY_BUDGET_EXCEEDED", spentTodayUsd: st.spentUsd, dailyLimitUsd: DAILY_LIMIT_USD, note: "Raise RUBRIC_X402_DAILY_LIMIT or retry after 00:00 UTC. No payment was made." };
-  const url = BASE + path;
-  const bodyStr = body === undefined ? undefined : JSON.stringify(body);
-  const quote = await quotedPriceUsd(url, method, bodyStr);
-  if (quote !== null && quote > max) return { error: "PRICE_ABOVE_TOOL_MAX", quotedUsd: quote, toolMaxUsd: max, note: "Server quoted more than this tool permits. No payment was made." };
-  const payFetch = await getPayFetch();
-  const r = await payFetch(url, { method, headers: { "content-type": "application/json" }, body: bodyStr });
-  const j = await r.json().catch(() => ({ raw: "non-json response" })) as Record<string, unknown>;
-  const spent = r.status === 200 ? recordSpend(quote ?? max) : spendState().spentUsd;
-  return { httpStatus: r.status, ...j, spentTodayUsd: spent, dailyLimitUsd: DAILY_LIMIT_USD };
+  const maxMicro = MAX_MICRO[tool] ?? 0;
+  const maxUsd = microToUsd(maxMicro);
+  if (!walletKey()) return NO_WALLET_MSG;
+  const apiBase = (process.env.RUBRIC_BASE_URL ?? "https://rubric-protocol.com").replace(/[/]$/, "");
+  const held = await reserve(maxMicro);
+  if (!held.ok) {
+    return {
+      error: "DAILY_BUDGET_EXCEEDED",
+      spentTodayUsd: microToUsd(held.spentMicro),
+      dailyLimitUsd: microToUsd(held.limitMicro),
+      note: "Reserved spend for today has reached RUBRIC_X402_DAILY_LIMIT. No payment was submitted. Resets 00:00 UTC.",
+    };
+  }
+
+  let signed = false;
+  try {
+    const client = await getClient(tool);
+    const { wrapFetchWithPayment } = await import("@x402/fetch");
+    const payFetch = wrapFetchWithPayment(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (requestSigned(input, init)) signed = true;
+      return fetch(input, init);
+    }, client);
+    const url = apiBase + path;
+    const response = await payFetch(url, {
+      method,
+      headers: { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const payload = await response.json().catch(() => ({ raw: "non-json response" })) as Record<string, unknown>;
+    // A response means the payment was submitted. Count it for every status.
+    return {
+      httpStatus: response.status,
+      ...payload,
+      spentTodayUsd: microToUsd(held.spentMicro),
+      dailyLimitUsd: microToUsd(held.limitMicro),
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!signed) {
+      const spentMicro = await release(maxMicro, held.date);
+      return {
+        error: "PAYMENT_REJECTED",
+        message,
+        toolMaxUsd: maxUsd,
+        spentTodayUsd: microToUsd(spentMicro),
+        dailyLimitUsd: microToUsd(held.limitMicro),
+        note: "No payment was submitted. Requirements must be USDC on Base paid to the published address, at or below this tool's maximum.",
+      };
+    }
+    return {
+      error: "PAYMENT_SUBMITTED",
+      message,
+      spentTodayUsd: microToUsd(held.spentMicro),
+      dailyLimitUsd: microToUsd(held.limitMicro),
+      note: "A payment was submitted and counts toward today's limit even though the call did not finish cleanly.",
+    };
+  }
+}
+
+const confirmField = {
+  type: "boolean",
+  description: "When RUBRIC_X402_CONFIRM=1, the first call without confirm returns the tool maximum and does not pay. Pass true to pay.",
+};
+
+function withConfirm(schema: { type: string; properties: Record<string, unknown>; required?: string[] }) {
+  return { ...schema, properties: { ...schema.properties, confirm: confirmField } };
 }
 
 export const X402_TOOLS = [
-  { name: "screen_entity", description: "PAID ($0.01 USDC): sanctions and export-control screening across OFAC SDN + Consolidated, UN, UK OFSI, EU, and BIS lists (76K+ entries). Returns per-list results plus a signed, Hedera-anchored attestation - audit evidence you screened, against which list versions, and what it said. Requires RUBRIC_WALLET_KEY.", inputSchema: { type: "object", properties: { name: { type: "string", description: "entity or individual name" }, query_id: { type: "string", description: "optional caller reference echoed into evidence" } }, required: ["name"] } },
-  { name: "wallet_record", description: "PAID ($0.005 USDC): attested x402 payment history for a Base/EVM buyer wallet from an append-only settlement ledger - settlements, first/last seen, spend, services. Evidence, not opinion.", inputSchema: { type: "object", properties: { address: { type: "string", description: "0x wallet address" } }, required: ["address"] } },
-  { name: "agent_record", description: "PAID ($0.005 USDC): unforgeable operating history for any agent attesting through Rubric - record count, first-seen, continuity, recent activity, from HCS-anchored records that cannot be backdated.", inputSchema: { type: "object", properties: { agent_id: { type: "string" } }, required: ["agent_id"] } },
-  { name: "attested_inference", description: "PAID ($0.01 USDC): gpt-4o-mini completion plus attestation binding prompt hash, response hash, exact model version, timestamp - evidence of which model said what, when.", inputSchema: { type: "object", properties: { prompt: { type: "string" }, max_tokens: { type: "number" } }, required: ["prompt"] } },
-  { name: "hedera_fact", description: "PAID ($0.001 USDC): one attested Hedera network fact (exchange-rate, gas-fees, supply, nodes, throughput, topic-state) with the attestation ID of the served snapshot.", inputSchema: { type: "object", properties: { fact: { type: "string", enum: ["exchange-rate", "gas-fees", "supply", "nodes", "throughput", "topic-state"] } }, required: ["fact"] } },
-  { name: "verify_audit", description: "PAID ($0.002 USDC): independent audit of a Rubric attestation - signature, HCS sequence, mirror-node confirmation - returning a signed verdict with its own attestation ID.", inputSchema: { type: "object", properties: { attestation_id: { type: "string" } }, required: ["attestation_id"] } },
+  { name: "screen_entity", description: "PAID ($0.01 USDC): sanctions and export-control screening across OFAC SDN + Consolidated, UN, UK OFSI, EU, and BIS lists (76K+ entries). Returns per-list results plus a signed, Hedera-anchored attestation - audit evidence you screened, against which list versions, and what it said. Requires RUBRIC_WALLET_KEY.", inputSchema: withConfirm({ type: "object", properties: { name: { type: "string", description: "entity or individual name" }, query_id: { type: "string", description: "optional caller reference echoed into evidence" } }, required: ["name"] }) },
+  { name: "wallet_record", description: "PAID ($0.005 USDC): attested x402 payment history for a Base/EVM buyer wallet from an append-only settlement ledger - settlements, first/last seen, spend, services. Evidence, not opinion.", inputSchema: withConfirm({ type: "object", properties: { address: { type: "string", description: "0x wallet address" } }, required: ["address"] }) },
+  { name: "agent_record", description: "PAID ($0.005 USDC): unforgeable operating history for any agent attesting through Rubric - record count, first-seen, continuity, recent activity, from HCS-anchored records that cannot be backdated.", inputSchema: withConfirm({ type: "object", properties: { agent_id: { type: "string" } }, required: ["agent_id"] }) },
+  { name: "attested_inference", description: "PAID ($0.01 USDC): gpt-4o-mini completion plus attestation binding prompt hash, response hash, exact model version, timestamp - evidence of which model said what, when.", inputSchema: withConfirm({ type: "object", properties: { prompt: { type: "string" }, max_tokens: { type: "number" } }, required: ["prompt"] }) },
+  { name: "hedera_fact", description: "PAID ($0.001 USDC): one attested Hedera network fact (exchange-rate, gas-fees, supply, nodes, throughput, topic-state) with the attestation ID of the served snapshot.", inputSchema: withConfirm({ type: "object", properties: { fact: { type: "string", enum: ["exchange-rate", "gas-fees", "supply", "nodes", "throughput", "topic-state"] } }, required: ["fact"] }) },
+  { name: "verify_audit", description: "PAID ($0.002 USDC): independent audit of a Rubric attestation - signature, HCS sequence, mirror-node confirmation - returning a signed verdict with its own attestation ID.", inputSchema: withConfirm({ type: "object", properties: { attestation_id: { type: "string" } }, required: ["attestation_id"] }) },
 ];
 
-export async function dispatchX402(name: string, a: Record<string, unknown>): Promise<unknown> {
+export interface X402CallOptions {
+  allowPayments?: boolean;
+}
+
+export async function dispatchX402(name: string, a: Record<string, unknown>, opts?: X402CallOptions): Promise<unknown> {
+  const known = Object.prototype.hasOwnProperty.call(MAX_MICRO, name);
+  if (!known) return null;
+  if (opts?.allowPayments !== true) return { error: "X402_DISABLED_IN_HTTP_MODE" };
+  if (confirmRequired() && a.confirm !== true) {
+    return {
+      confirmationRequired: true,
+      tool: name,
+      maxPriceUsd: microToUsd(MAX_MICRO[name] ?? 0),
+      network: BASE_NETWORK,
+      asset: USDC_BASE,
+      payTo: PAYTO,
+      note: "RUBRIC_X402_CONFIRM is set. No payment was made. Call again with confirm: true to pay up to the tool maximum.",
+    };
+  }
   switch (name) {
     case "screen_entity": return paidCall(name, "/v1/x402/attested-screening", "POST", { name: a.name, queryId: a.query_id });
     case "wallet_record": return paidCall(name, "/v1/x402/wallet-record/" + encodeURIComponent(String(a.address ?? "")), "GET");

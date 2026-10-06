@@ -8,7 +8,9 @@
     "rubric-mcp": "./dist/index.js"
   },
   "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
   "files": [
     "dist",
     "README.md",
@@ -16,7 +18,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node --test tests/http.test.mjs",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -43,18 +45,19 @@
     "url": "https://github.com/tenprint-ai/tenprint-mcp/issues"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "@x402/evm": "^2.20.0",
-    "@x402/fetch": "^2.20.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "@x402/core": "^2.28.0",
+    "@x402/evm": "^2.28.0",
+    "@x402/fetch": "^2.28.0",
     "viem": "^2.55.10",
     "zod": "^3.22.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
+    "@types/node": "^22.0.0",
     "typescript": "^5.4.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "mcpName": "ai.tenprint/tenprint"
 }

@@ -65,25 +65,35 @@ Six tools that pay per call in USDC on Base via the x402 protocol. No TenPrint a
 | `verify_audit` | $0.002 | Independent audit of any TenPrint attestation: signature, HCS sequence, mirror-node confirmation - a signed verdict with its own attestation ID |
 | `hedera_fact` | $0.001 | One attested Hedera network fact (exchange rate, gas, supply, nodes, throughput, topic state) |
 
-### Setup (3 steps)
+### Setup
 
-1. Create a wallet and fund it with a few dollars of USDC on **Base** (Coinbase -> withdraw USDC -> network: Base)
-2. Set `RUBRIC_WALLET_KEY` to the wallet's private key in your MCP server environment
-3. Optional: `RUBRIC_X402_DAILY_LIMIT` (default `1.00` USD/day)
+1. Create a **dedicated** wallet and fund it with a small amount of USDC on **Base**. Use that wallet only for these tool payments. Do not put `RUBRIC_WALLET_KEY` on a main wallet or any wallet that holds funds you cannot afford to lose.
+2. Set `RUBRIC_WALLET_KEY` to that wallet's private key in the MCP client config that launches this server.
+3. Optional: `RUBRIC_X402_DAILY_LIMIT` (default `1.00` USD/day). Optional: `RUBRIC_X402_CONFIRM=1`.
 
-### Money safety, by design
+### Before you put a key in a client config
 
-- **No wallet key?** Paid tools return setup guidance - never errors, never charges.
-- **Daily ceiling.** Spending stops at your limit; the tool returns a budget error your agent can read. Resets 00:00 UTC.
-- **Price protection.** Before paying, each tool checks the server's quoted price against its documented maximum and refuses anything higher - even we cannot overcharge you.
-- **Full accounting.** Every paid response includes `spentTodayUsd`.
-- Your key never leaves the MCP process. A failed operation is never charged.
+- The private key sits in plaintext in the MCP client config file. Anyone who can read that file can spend the wallet.
+- Prompt injection can ask the client to call a paid tool. With the default settings there is no per-call confirmation, so a injected instruction can spend USDC up to the daily limit.
+- Set `RUBRIC_X402_CONFIRM=1` to require a second call. The first call returns `confirmationRequired` and the tool maximum and does not contact the network. Call the same tool again with `confirm: true` to pay. The tool maximum and the daily limit still apply.
+- `RUBRIC_BASE_URL` chooses the API host. If it points somewhere else, that host is who this process asks for payment requirements. Keep it on an API you trust.
+
+### What this process enforces
+
+- A payment is signed only for Base (`eip155:8453`, or the v1 network name `base`), asset USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, and payTo `0xaB6731A0BcDf511c2842C768a03448075aB654ca`, and only when the amount is at or below that tool's documented maximum. The check is on the requirements that would be signed.
+- The daily limit reserves that tool maximum before signing. Once a payment is submitted, it counts toward the limit whatever HTTP status comes back. If signing never happens, the reservation is released. The counter resets at 00:00 UTC.
+- No wallet key: the tool returns setup guidance and does not pay.
+- Paid responses include `spentTodayUsd`. That number is what this process has reserved, not a promise about charges made outside it.
+
+x402 tools are stdio-only. HTTP mode does not list them, does not call them, and does not sign with `RUBRIC_WALLET_KEY` or `TENPRINT_WALLET_KEY`.
 
 ## Module configuration
 
 Tools load by module via `RUBRIC_MCP_MODULES` (default: `core,x402`).
 Available: `core`, `x402`, `attestation`, `verification`, `compliance`,
 `regulatory`, `governance`, `registry`, `ops`, or `all`.
+
+A module left out of that list is omitted from `tools/list` and rejected on `tools/call`. HTTP mode also rejects the x402 module even when the list includes `x402` or `all`.
 
 ## Regulatory coverage
 
@@ -121,21 +131,23 @@ Default profile is `core` plus `x402`. Set `RUBRIC_MCP_MODULES=all` for the rest
 
 ## Streamable HTTP
 
-The npm bin stays on stdio. To serve a remote endpoint:
+The npm bin stays on stdio. Requires Node.js 22 or newer. To serve a remote endpoint:
 
-    PORT=8080 node dist/index.js --http
+    HOST=0.0.0.0 PORT=8080 node dist/index.js --http
 
-`PORT` defaults to 3000.
+`PORT` defaults to 3000. `HOST` defaults to `127.0.0.1`. Set `HOST=0.0.0.0` when the process should accept connections from outside the machine. The Docker image sets that.
 
-- `POST /mcp` — MCP Streamable HTTP. `initialize` and `tools/list` need no credentials, so a directory can scan the server. `tools/call` requires a key on that request and otherwise returns HTTP 401 with a JSON-RPC error (`code` -32000, `message` "Unauthorized").
+- `POST /mcp` — MCP Streamable HTTP. `initialize` and `tools/list` need no credentials, so a directory can scan the server. `tools/call` requires a key on that request and otherwise returns HTTP 401 with a JSON-RPC error (`code` -32000, `message` "Unauthorized"). `GET` and `DELETE /mcp` return 405.
 - Send the key as `Authorization: Bearer <key>` or `x-api-key: <key>`. That request key is what is sent upstream as `x-api-key`. `TENPRINT_API_KEY` and `RUBRIC_API_KEY` apply to stdio only. They do not authorize HTTP `tools/call`, so a hosted process cannot spend its own key for an anonymous caller.
-- x402 paid tools are not listed or callable in HTTP mode, even if `RUBRIC_MCP_MODULES` includes `x402` or `all`. A `RUBRIC_WALLET_KEY` or `TENPRINT_WALLET_KEY` on the process is not used to sign or pay. stdio is unchanged.
+- x402 paid tools are not listed or callable whenever the HTTP server is running, including when `startHttpServer` is imported directly. `RUBRIC_MCP_MODULES` does not turn them back on. `RUBRIC_WALLET_KEY` and `TENPRINT_WALLET_KEY` are not used to sign or pay.
+- Requests with no `Origin` are accepted. A request that sends `Origin` is rejected unless that value is listed in `TENPRINT_ALLOWED_ORIGINS` (comma-separated). `Host` must be `localhost`, `127.0.0.1`, or `::1`, or a value listed in `TENPRINT_ALLOWED_HOSTS`. Set the public hostname there when a reverse proxy forwards one. The server does not send `Access-Control-Allow-Origin: *`.
+- Request bodies are limited to 1 MB. `/mcp` is rate limited per IP and per API key (default 120 requests per minute, `TENPRINT_RATE_LIMIT_PER_MINUTE`).
 - `GET /health` — `{ "status": "ok" }`
-- `GET /.well-known/mcp/server-card.json` — server card. Its `tools` array is the same list `tools/list` returns for this process.
+- `GET /.well-known/mcp/server-card.json` — server card. Its `tools` array is the same list `tools/list` returns for this process. `authentication.required` is true because `tools/call` requires a key. `initialize` and `tools/list` stay open.
 
 ## Docker
 
-The image runs the HTTP transport, not stdio. `RUBRIC_MCP_MODULES` in the image is `core`. x402 tools stay off in HTTP mode even if that variable includes them.
+The image runs the HTTP transport, not stdio, and listens on `0.0.0.0`. `RUBRIC_MCP_MODULES` in the image is `core`. x402 tools stay off in HTTP mode even if that variable includes them. The image runs as the `node` user. Set `TENPRINT_ALLOWED_HOSTS` to the public hostname if clients send that `Host` header.
 
     docker build -t tenprint-mcp .
     docker run --rm -p 8080:8080 tenprint-mcp

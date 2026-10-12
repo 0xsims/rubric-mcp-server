@@ -14,7 +14,9 @@
   "files": [
     "dist",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsc",
@@ -34,7 +36,7 @@
     "ai-governance"
   ],
   "author": "Scott Sims <scott@rubric-protocol.com>",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/tenprint-ai/tenprint-mcp",

@@ -155,9 +155,14 @@ The image runs the HTTP transport, not stdio, and listens on `0.0.0.0`. `RUBRIC_
 
 `POST http://127.0.0.1:8080/mcp` then serves `initialize` and `tools/list` with no key. `tools/call` needs `Authorization: Bearer <key>` or `x-api-key` on the request. Setting `TENPRINT_API_KEY` on the container does not open `tools/call`.
 
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+TenPrint MCP Server. Copyright 2026 Echelon Intelligence Group LLC. TenPrint is a trademark of Echelon Intelligence Group LLC.
+
 ## Not published yet
 
-- **License.** The owner has not chosen one. There is no `LICENSE` file. `package.json` still says `SEE LICENSE IN LICENSE`. Do not treat this package as licensed for reuse until that file exists.
 - **Repository and registry.** The names below are the intended ones after transfer. `github.com/tenprint-ai/tenprint-mcp` does not exist yet. `ai.tenprint/tenprint` still needs DNS or HTTP proof for the MCP registry, and `@tenprint/mcp-server` is not published. Do not treat those URLs as live.
 
 ## Links

@@ -1,10 +1,10 @@
 {
   "name": "@rubric-protocol/mcp-server",
-  "version": "2.2.3",
+  "version": "2.2.4",
   "description": "Rubric Protocol MCP server — attest, verify, ZK proofs, compliance tagging, framework detection. Free local tier, Hedera mainnet anchoring with API key.",
   "type": "module",
   "bin": {
-    "rubric-mcp": "./dist/index.js"
+    "rubric-mcp": "dist/index.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

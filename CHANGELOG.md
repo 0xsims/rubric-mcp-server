@@ -1,3 +1,7 @@
+## 2.2.4
+
+- Security: updated dependencies including @modelcontextprotocol/sdk, hono, proxy-addr, fast-uri, body-parser, ip-address and qs.
+
 ## 2.2.3
 
 - License set to Apache-2.0.

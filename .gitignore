@@ -4,3 +4,4 @@ dist/
 *.pre-2.0.3
 .env
 .env.*
+*.tgz

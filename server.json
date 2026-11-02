@@ -1,26 +1,45 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.0xsims/rubric-protocol",
-  "description": "AI compliance attestation for EU AI Act, SR 11-7, HIPAA. Free local tier, no key required.",
+  "name": "io.github.0xsims/rubric-mcp",
+  "description": "Attested evidence tools for AI agents: sanctions screening, agent/wallet records, paid via x402.",
   "repository": {
-    "url": "https://github.com/0xsims/rubric-mcp-server",
+    "url": "https://github.com/0xsims/rubric-mcp",
     "source": "github"
   },
-  "version": "2.0.2",
+  "version": "2.2.2",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@rubric-protocol/mcp-server",
-      "version": "2.0.2",
+      "version": "2.2.2",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
-          "name": "RUBRIC_API_KEY",
-          "description": "Rubric API key for Hedera mainnet anchoring. Optional \u2014 omit for free local PQ-signed attestation.",
+          "name": "RUBRIC_WALLET_KEY",
+          "description": "Optional. USDC-on-Base wallet private key enabling paid x402 tools; without it paid tools return setup guidance.",
           "isRequired": false,
           "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "RUBRIC_X402_DAILY_LIMIT",
+          "description": "Optional. Daily spend ceiling in USD for paid tools (default 1.00).",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "RUBRIC_API_KEY",
+          "description": "Optional. Rubric developer key for HCS-anchored attestation.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "RUBRIC_MCP_MODULES",
+          "description": "Optional. Comma-separated tool modules (default core,x402).",
+          "isRequired": false,
           "format": "string"
         }
       ]
